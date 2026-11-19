@@ -48,7 +48,7 @@ class Config:
     gain: bool = True              # képkockánkénti erősítés-kiegyenlítés
     distortion: bool = True        # szenzorhoz rögzített geometriai torzítás önkalibrációja
     dist_deg: int = 3
-    dist_frames: int = 60          # ennyi (időben egyenletesen választott) képkockából kalibrál
+    dist_frames: int = 30          # ennyi (időben egyenletesen választott) képkockából kalibrál
     ca: bool = True                # kromatikus aberráció (laterális CA + légköri diszperzió) korrekciója
     ca_frames: int = 16            # ennyi képkockából méri a CA-mezőt
     defringe: float = 0.5          # színszegély-csillapítás erőssége az élesített képen (0 = ki)
@@ -104,13 +104,25 @@ def run(inp, outdir, cfg: Config = Config()):
 
     # ---- 1. elemzés: kicsinyített kép, Hold-maszk, globális élesség, telítettség -----------------
     def analyse(i, raw):
-        f = to_float(raw)
-        g = luminance(f)
-        s = cv2.resize(g, (W // ds, H // ds), interpolation=cv2.INTER_AREA)
+        # gyors út: szürke uint8-ból, a teljes felbontású munka csak a Hold körüli kivágáson
+        scale = 1.0 / (65535.0 if raw.dtype == np.uint16 else 255.0)
+        g8 = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY) if raw.ndim == 3 else raw
+        s = cv2.resize(g8, (W // ds, H // ds), interpolation=cv2.INTER_AREA).astype(np.float32) * scale
         m = geo.moon_mask(s)
-        mf = cv2.resize(m.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(bool)
-        sat = float((f.max(axis=2)[mf] >= 0.98).mean()) if mf.any() else 0.0
-        return i, s.astype(np.float16), m, geo.sharpness(g, geo.erode(mf, 6 * ds)), sat
+        if not m.any():
+            return i, s.astype(np.float16), m, 0.0, 0.0
+        ys, xs = np.nonzero(m)
+        sy0, sy1, sx0, sx1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+        me = geo.erode(m, 6)[sy0:sy1, sx0:sx1]
+        mfull = cv2.resize(me.astype(np.uint8), ((sx1 - sx0) * ds, (sy1 - sy0) * ds),
+                           interpolation=cv2.INTER_NEAREST).astype(bool)
+        y0, x0 = sy0 * ds, sx0 * ds
+        g = g8[y0:y0 + mfull.shape[0], x0:x0 + mfull.shape[1]].astype(np.float32) * scale
+        mfull = mfull[:g.shape[0], :g.shape[1]]
+        rc = raw[y0:y0 + g.shape[0], x0:x0 + g.shape[1]]
+        mx_ = rc.max(axis=2) if rc.ndim == 3 else rc
+        sat = float((mx_[mfull] >= 0.98 / scale).mean()) if mfull.any() else 0.0
+        return i, s.astype(np.float16), m, geo.sharpness(g, mfull), sat
 
     smalls, masks, sharp, satin = {}, {}, {}, {}
     for i, s, m, q, st in _pmap(src, None, analyse, workers, label="elemzés"):
@@ -170,7 +182,9 @@ def run(inp, outdir, cfg: Config = Config()):
 
     ca_holder = [None]
 
-    def corrected(i, raw, ca=True):
+    def corrected(i, raw, ca=False):
+        """Flat + erősítés. A CA-korrekciót a stack a remap-be olvasztva végzi (ca=False);
+        ca=True csak külön kérésre, teljes képre."""
         f = to_float(raw)
         if inv_g is not None:
             f *= inv_g[..., None]
@@ -205,26 +219,41 @@ def run(inp, outdir, cfg: Config = Config()):
         else:
             _log(f"kromatikus aberráció: nincs korrekció ({cainfo.get('msg')})", t0)
 
-    gy, gx = np.mgrid[0:H, 0:W].astype(np.float32)
+    # Kimeneti vászon: kezdetben a teljes képkocka, a kezdeti referencia után a Hold körüli kivágás
+    # (ROI). A vászon (0,0) pontja a referencia-képkocka off=(x0,y0) pontja; ezt a T eltolás a
+    # leképezésekbe olvasztja, így minden további lépés csak a ROI-n dolgozik.
+    cv = dict(W=W, H=H, off=(0, 0), cg=distmod.CoarseGrid(W, H, 8))
+
+    def T_off():
+        x0, y0 = cv["off"]
+        return np.array([[1, 0, x0], [0, 1, y0], [0, 0, 1]], np.float64)
 
     def warp_gray(i, raw):
         g = luminance(corrected(i, raw))
-        return i, g, maps[i].warp(g, W, H, gx, gy, cv2.INTER_LINEAR, -1.0)
+        return i, g, maps[i].warp(g, cv["W"], cv["H"], cv["cg"], cv2.INTER_LINEAR, -1.0)
 
     nref = min(len(cand), max(cfg.ref_min, int(math.ceil(cfg.ref_percent / 100 * len(cand)))))
     ref_set = [i for i in order if i in Hf][:nref]
     ref_mask_d = cv2.resize(masks[ref_i].astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST).astype(np.float32)
 
     def build_reference():
-        acc = np.zeros((H, W), np.float64); cnt = np.zeros((H, W), np.float64)
+        OW, OH = cv["W"], cv["H"]
+        acc = np.zeros((OH, OW), np.float64); cnt = np.zeros((OH, OW), np.float64)
         for i, g, w in _pmap(src, ref_set, warp_gray, workers, label="referencia"):
             v = w >= 0
             acc[v] += w[v]; cnt[v] += 1
         ref = (acc / np.maximum(cnt, 1)).astype(np.float32)
-        rm = maps[ref_i].warp(ref_mask_d, W, H, gx, gy, cv2.INTER_NEAREST, 0.0) > 0.5
+        rm = maps[ref_i].warp(ref_mask_d, OW, OH, cv["cg"], cv2.INTER_NEAREST, 0.0) > 0.5
         rm &= cnt >= max(1, nref // 2)
         aps, struct, step = apmod.make_grid(ref, geo.erode(rm, 4), cfg.half_box, cfg.step, struct_rel=cfg.struct_rel)
         return ref, rm, aps, step
+
+    def full_mask(m):
+        """ROI-maszk visszahelyezése a teljes képkocka-méretbe."""
+        out = np.zeros((H, W), bool)
+        x0, y0 = cv["off"]
+        out[y0:y0 + m.shape[0], x0:x0 + m.shape[1]] = m
+        return out
 
     def measure_all(reference, aps, frames, label="AP-mérés"):
         refb = cv2.GaussianBlur(reference, (0, 0), 1.0)
@@ -248,7 +277,17 @@ def run(inp, outdir, cfg: Config = Config()):
 
     # ---- 4. kezdeti referencia és AP-rács (torzított térben) -----------------------------------
     ref0, ref_mask, aps, step = build_reference()
-    _log(f"kezdeti referencia: {nref} kocka átlaga; AP-rács: {len(aps)} pont", t0)
+    # ROI: a Hold befoglaló téglalapja + tartalék (keresés, AP-box, torzítás-korrekció)
+    ys_, xs_ = np.nonzero(ref_mask)
+    margin = 2 * (cfg.search + cfg.half_box) + 120
+    x0, x1 = max(0, xs_.min() - margin), min(W, xs_.max() + 1 + margin)
+    y0, y1 = max(0, ys_.min() - margin), min(H, ys_.max() + 1 + margin)
+    cv.update(W=int(x1 - x0), H=int(y1 - y0), off=(int(x0), int(y0)))
+    cv["cg"] = distmod.CoarseGrid(cv["W"], cv["H"], 8)
+    maps = {i: distmod.FrameMap(Hf[i] @ T_off()) for i in cand}
+    ref0, ref_mask, aps, step = build_reference()
+    _log(f"kezdeti referencia: {nref} kocka átlaga; munkaterület (ROI) {cv['W']}x{cv['H']} "
+         f"({cv['W'] * cv['H'] / (W * H) * 100:.0f}% a teljes képből); AP-rács: {len(aps)} pont", t0)
 
     # ---- 5. torzítás-önkalibráció ------------------------------------------------------------------
     dinfo = dict(enabled=False, msg="kikapcsolva")
@@ -263,20 +302,23 @@ def run(inp, outdir, cfg: Config = Config()):
         nb0 = apmod.Neighbors(aps, step)
         sh0, ok0 = apmod.smooth(sh0, ok0, nb0)
         corr = []
-        p = aps[:, ::-1].astype(np.float64)  # (x, y)
+        p = aps[:, ::-1].astype(np.float64)  # (x, y) a ROI-ban
+        off = np.array(cv["off"], np.float64)
         for k, i in enumerate(dframes):
             o = ok0[k]
-            xr = p[o]
-            xk = cv2.perspectiveTransform((p[o] + sh0[k][o][:, ::-1])[None], Hf[i])[0]
+            xr = p[o] + off                                   # teljes ref-képkocka koordináta
+            xk = maps[i].points(p[o] + sh0[k][o][:, ::-1])    # képkocka-koordináta
             corr.append((xr, xk))
         dist, dinfo = distmod.calibrate(corr, W, H, deg=cfg.dist_deg)
         if dist is not None:
             ys, xs = np.nonzero(geo.erode(ref_mask, 20))
             sel = np.random.default_rng(1).choice(len(xs), min(4000, len(xs)), replace=False)
-            pts_ref = np.stack([xs[sel], ys[sel]], 1).astype(np.float64)
-            maps = {i: distmod.FrameMap(distmod.frame_homography(dist, Hf[i], pts_ref), dist) for i in cand}
-            dinfo["max_shift_moon_px"] = distmod.max_shift_in(dist, ref_mask)
-            cv2.imwrite(os.path.join(outdir, "_torzitas_mezo.png"), distmod.draw_field(dist, W, H, ref_mask))
+            pts_ref = np.stack([xs[sel], ys[sel]], 1).astype(np.float64) + off
+            maps = {i: distmod.FrameMap(distmod.frame_homography(dist, Hf[i], pts_ref) @ T_off(), dist)
+                    for i in cand}
+            fm = full_mask(ref_mask)
+            dinfo["max_shift_moon_px"] = distmod.max_shift_in(dist, fm)
+            cv2.imwrite(os.path.join(outdir, "_torzitas_mezo.png"), distmod.draw_field(dist, W, H, fm))
             _log(f"torzítás: {dinfo['frames']} kocka, {dinfo['points']} pontpár; maradék rms "
                  f"{dinfo['rms_before']:.2f} -> {dinfo['rms_after']:.2f} px (medián {dinfo['median_before']:.2f} -> "
                  f"{dinfo['median_after']:.2f}); max korrekció a Hold területén {dinfo['max_shift_moon_px']:.1f} px", t0)
@@ -287,8 +329,10 @@ def run(inp, outdir, cfg: Config = Config()):
                  + (f", rms {dinfo['rms_before']:.2f} -> {dinfo['rms_after']:.2f} px" if 'rms_before' in dinfo else "")
                  + ")", t0)
 
+    OW, OH = cv["W"], cv["H"]
     nb = apmod.Neighbors(aps, step)
-    field = apmod.Field(aps, (H, W), step)
+    field = apmod.Field(aps, (OH, OW), step)
+    scg = distmod.CoarseGrid(OW, OH, field.f)   # ugyanaz a durva rács, mint az eltolási mezőé
     cand_pos = {i: k for k, i in enumerate(cand)}
     _log(f"AP-rács: {len(aps)} pont, box={2 * cfg.half_box}px, lépés={step}px", t0)
 
@@ -296,17 +340,28 @@ def run(inp, outdir, cfg: Config = Config()):
     def stack(sh, ok, wap, wglob, color, interp=cv2.INTER_CUBIC, label="stack"):
         need = [i for i in cand if wap[cand_pos[i]].max() > 0 or wglob[cand_pos[i]] > 0]
         ch = 3 if color else 1
-        num = np.zeros((H, W, ch), np.float32); den = np.zeros((H, W), np.float32)
+        num = np.zeros((OH, OW, ch), np.float32); den = np.zeros((OH, OW), np.float32)
+        caf = ca_holder[0] if color else None
 
         def one(i, raw):
             k = cand_pos[i]
             f = corrected(i, raw)
             img = f if color else luminance(f)
-            dy = field.up(field.shift(sh[k, :, 0], ok[k]))
-            dx = field.up(field.shift(sh[k, :, 1], ok[k]))
+            # minden leképezés a durva rácson (eltolási mező + homográfia + torzítás [+ CA]), majd felskálázás
+            xs = scg.xc + field.shift(sh[k, :, 1], ok[k])
+            ys = scg.yc + field.shift(sh[k, :, 0], ok[k])
+            mxc, myc = maps[i].map_xy(xs, ys)
+            mx, my = scg.up_map(mxc, myc)
             wm = field.up(field.weight(wap[k], wglob[k]))
-            mx, my = maps[i].grid(gx + dx, gy + dy)
-            out = cv2.remap(img, mx, my, interp, borderMode=cv2.BORDER_REFLECT)
+            if caf is not None:
+                out = np.empty((OH, OW, 3), np.float32)
+                out[..., colormod.G] = cv2.remap(img[..., colormod.G], mx, my, interp, borderMode=cv2.BORDER_REFLECT)
+                for c in (colormod.R, colormod.B):
+                    dxc, dyc = caf.shift_at(c, mxc, myc)
+                    cx, cy = scg.up_map(mxc + dxc, myc + dyc)
+                    out[..., c] = cv2.remap(img[..., c], cx, cy, interp, borderMode=cv2.BORDER_REFLECT)
+            else:
+                out = cv2.remap(img, mx, my, interp, borderMode=cv2.BORDER_REFLECT)
             wm = wm * ((mx >= 0) & (mx <= W - 1) & (my >= 0) & (my <= H - 1))
             return wm.astype(np.float32), out
 
@@ -344,13 +399,13 @@ def run(inp, outdir, cfg: Config = Config()):
     # ---- 7. kivágás, fényesség, mentés, jelentés -------------------------------------------------
     ys, xs = np.nonzero(ref_mask)
     pad = 60
-    y0, y1 = max(0, ys.min() - pad), min(H, ys.max() + pad)
-    x0, x1 = max(0, xs.min() - pad), min(W, xs.max() + pad)
+    y0, y1 = max(0, ys.min() - pad), min(OH, ys.max() + pad)
+    x0, x1 = max(0, xs.min() - pad), min(OW, xs.max() + pad)
     # maradék CA + légköri diszperzió a kész stacken (kimeneti koordinátákban, lineáris mező)
     ca2 = dict(enabled=False, msg="kikapcsolva")
     if cfg.ca and result.ndim == 3:
         s2 = colormod.measure(np.clip(result, 0, None), geo.erode(ref_mask, 30), step=56)
-        f2, ca2 = colormod.CAField.fit(s2, W, H, deg=1, min_pts=30)
+        f2, ca2 = colormod.CAField.fit(s2, OW, OH, deg=1, min_pts=30)
         if f2 is not None and max(ca2["R"]["max_shift_px"], ca2["B"]["max_shift_px"]) > 0.05:
             result = f2.apply(result)
             _log(f"maradék színhiba a stacken: R {ca2['R']['mean_shift_px']:.2f} px, "
@@ -386,7 +441,7 @@ def run(inp, outdir, cfg: Config = Config()):
         col = (0, int(255 * r), int(255 * (1 - r)))
         cv2.rectangle(vis, (int(x - cfg.half_box), int(y - cfg.half_box)),
                       (int(x + cfg.half_box), int(y + cfg.half_box)), col, 2)
-    cv2.imwrite(os.path.join(outdir, f"{base}_aps.jpg"), cv2.resize(vis, (W // 2, H // 2)),
+    cv2.imwrite(os.path.join(outdir, f"{base}_aps.jpg"), cv2.resize(vis, (OW // 2, OH // 2)),
                 [cv2.IMWRITE_JPEG_QUALITY, 85])
     if gflat is not None:
         save8(os.path.join(outdir, f"{base}_flat.png"), gflat / gflat.max())
@@ -407,7 +462,9 @@ def run(inp, outdir, cfg: Config = Config()):
                             gain=gains.get(i), global_weight=float(wglob[cand_pos[i]]) if i in cand_pos else 0.0,
                             ap_weight_mean=float(wsel[cand_pos[i]].mean()) if i in cand_pos else 0.0)
                        for i in range(n)],
-        crop=[int(x0), int(y0), int(x1), int(y1)], seconds=time.time() - t0)
+        roi=[cv["off"][0], cv["off"][1], OW, OH],
+        crop=[int(x0) + cv["off"][0], int(y0) + cv["off"][1], int(x1) + cv["off"][0], int(y1) + cv["off"][1]],
+        seconds=time.time() - t0)
     with open(os.path.join(outdir, f"{base}_report.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=1, default=float)
     _log(f"kész: {outdir}", t0)

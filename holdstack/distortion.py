@@ -52,6 +52,14 @@ class Distortion:
             x = np.stack([pts[:, 0] - dx, pts[:, 1] - dy], 1)
         return x
 
+    def D_xy(self, ux, uy, iters=12):
+        """D tetszőleges alakú koordináta-tömbökre."""
+        x, y = ux.copy(), uy.copy()
+        for _ in range(iters):
+            dx, dy = self._delta(x, y)
+            x, y = ux - dx, uy - dy
+        return x, y
+
     def dense_D(self):
         """D előre kiszámolva egy kissé kibővített rácson (remap-pel kombinálható)."""
         if self._dmap is None:
@@ -97,15 +105,48 @@ class FrameMap:
             my = cv2.remap(Dy, px, py, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
         return mx, my
 
-    def warp(self, img, W, H, gx=None, gy=None, interp=cv2.INTER_LINEAR, border=-1.0):
+    def map_xy(self, xs, ys):
+        """Leképezés tetszőleges (pl. durva rácsú) koordináta-tömbökre, float64 pontossággal."""
+        h = self.G
+        z = h[2, 0] * xs + h[2, 1] * ys + h[2, 2]
+        mx = (h[0, 0] * xs + h[0, 1] * ys + h[0, 2]) / z
+        my = (h[1, 0] * xs + h[1, 1] * ys + h[1, 2]) / z
+        if self.dist is not None:
+            mx, my = self.dist.D_xy(mx, my)
+        return mx, my
+
+    def warp(self, img, W, H, coarse=None, interp=cv2.INTER_LINEAR, border=-1.0):
+        """A képkocka a kimeneti vászonra (W x H). Torzítás nélkül pontos warpPerspective;
+        torzítással a leképezés a durva rácson (coarse: CoarseGrid) számolódik és felskálázódik."""
         if self.dist is None:
             return cv2.warpPerspective(img, self.G, (W, H), flags=interp | cv2.WARP_INVERSE_MAP,
                                        borderMode=cv2.BORDER_CONSTANT, borderValue=border)
-        mx, my = self.grid(gx, gy)
+        mx, my = coarse.up_map(*self.map_xy(coarse.xc, coarse.yc))
         return cv2.remap(img, mx, my, interp, borderMode=cv2.BORDER_CONSTANT, borderValue=border)
 
 
-def calibrate(corr, W, H, deg=3, ridge=1e-4, max_pts=600, seed=0):
+class CoarseGrid:
+    """Durva rács a kimeneti vásznon: a (j+0.5)*f-0.5 pixelközéppontok, ami pontosan megfelel a
+    cv2.resize(INTER_LINEAR) felskálázásnak. A homográfia, a torzítás és az AP-eltolási mező is
+    sima, így a durva rácson számolt, majd lineárisan felskálázott leképezés hibája elhanyagolható
+    (<0.01 px), a számítás pedig f²-szer kevesebb."""
+
+    def __init__(self, W, H, f):
+        self.W, self.H, self.f = W, H, f
+        self.ws, self.hs = -(-W // f), -(-H // f)
+        xc = (np.arange(self.ws) + 0.5) * f - 0.5
+        yc = (np.arange(self.hs) + 0.5) * f - 0.5
+        self.yc, self.xc = np.meshgrid(yc, xc, indexing="ij")
+
+    def up(self, a):
+        big = cv2.resize(a.astype(np.float32), (self.ws * self.f, self.hs * self.f), interpolation=cv2.INTER_LINEAR)
+        return big[:self.H, :self.W]
+
+    def up_map(self, mx, my):
+        return self.up(mx), self.up(my)
+
+
+def calibrate(corr, W, H, deg=3, ridge=1e-4, max_pts=400, seed=0):
     """corr: lista (x_ref (N,2), x_k (N,2)) teljes felbontású px-ben, képkockánként.
     Visszaad: (Distortion | None, info dict)."""
     rng = np.random.default_rng(seed)

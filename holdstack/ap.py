@@ -72,14 +72,21 @@ def measure(warped, valid, ref_blur, aps, half_box, search, min_corr=0.5):
 def local_quality_at(gray_frame, pts, half_box):
     """AP-nkénti élesség az EREDETI (nem interpolált) képkockán: Laplace-var / átlag².
     pts: az AP-k helye a képkockában (N,2) [x, y]."""
-    gb = cv2.GaussianBlur(gray_frame, (0, 0), 1.5)
-    lap = cv2.Laplacian(gb, cv2.CV_32F)
     Hh, Ww = gray_frame.shape
     q = np.zeros(len(pts), np.float32)
     hb = half_box
+    # csak az AP-k befoglaló téglalapján szűrünk (a Hold), nem a teljes képkockán
+    pad = hb + 8
+    X0 = int(max(0, np.floor(pts[:, 0].min()) - pad)); X1 = int(min(Ww, np.ceil(pts[:, 0].max()) + pad))
+    Y0 = int(max(0, np.floor(pts[:, 1].min()) - pad)); Y1 = int(min(Hh, np.ceil(pts[:, 1].max()) + pad))
+    if X1 <= X0 or Y1 <= Y0:
+        return q
+    gb = np.zeros_like(gray_frame); lap = np.zeros_like(gray_frame)
+    gb[Y0:Y1, X0:X1] = cv2.GaussianBlur(gray_frame[Y0:Y1, X0:X1], (0, 0), 1.5)
+    lap[Y0:Y1, X0:X1] = cv2.Laplacian(gb[Y0:Y1, X0:X1], cv2.CV_32F)
     for a, (x, y) in enumerate(pts):
         xi, yi = int(round(x)), int(round(y))
-        if yi - hb < 0 or xi - hb < 0 or yi + hb > Hh or xi + hb > Ww:
+        if yi - hb < Y0 or xi - hb < X0 or yi + hb > Y1 or xi + hb > X1:
             continue
         box = gb[yi - hb:yi + hb, xi - hb:xi + hb]
         mu = box.mean()

@@ -102,6 +102,17 @@ class CAField:
                 self._maps[c] = (xs + dx, ys + dy)
         return self._maps
 
+    def shift_at(self, c, x, y):
+        """A c csatorna eltolása (dx, dy) tetszőleges koordináta-tömbökön."""
+        s = max(self.W, self.H) / 2.0
+        a = (x - self.W / 2.0) / s; b = (y - self.H / 2.0) / s
+        cc = self.coef[c]
+        dx = np.zeros_like(a); dy = np.zeros_like(a)
+        for (i, j), cx, cy in zip(_terms(self.deg), cc[0], cc[1]):
+            m = a ** i * b ** j
+            dx += cx * m; dy += cy * m
+        return dx, dy
+
     def apply(self, img):
         out = img.copy()
         for c, (mx, my) in self.maps().items():

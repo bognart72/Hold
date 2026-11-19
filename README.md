@@ -141,6 +141,22 @@ Opcionális külön kép: `*_mineral.tif` és `*_mineral.png`.
 
 Részletes háttér, szakirodalom és mérések: `KUTATAS_es_TERV.md`.
 
+## v0.3 – gyorsítás
+
+| Bemenet | v0.2 | v0.3 | Minőség |
+|---|---|---|---|
+| Videó, 620 kocka, 4K | 1483 s (~25 perc) | **796 s (~13 perc)** | élesség 1,293e-4 → 1,287e-4, fényesség azonos, torzítás-maradék 0,50 → 0,52 px |
+| 17 fotó, 12 MP | 249 s | **141 s** | élesség 3,025e-5 → 3,030e-5, fényesség azonos |
+
+A gyorsítás forrásai:
+- **ROI munkaterület:** az első referencia után minden mérés és a stack csak a Hold körüli kivágáson fut. A videón ez a kép 55%-a.
+- **Durva rácsú leképezés:** az eltolási mező, a homográfia, a torzítás és a CA 8 px-es rácson számolódik, majd lineárisan felskálázódik. A hiba < 0,01 px.
+- **CA a stack remapjébe olvasztva:** csatornánként egyetlen interpoláció, nincs külön teljes képes CA-lépés.
+- **Gyors elemzés:** szürke uint8, élesség és telítés csak a Hold kivágásán. 207 s → 55 s.
+- **Rövidebb ECC finom szint, és a torzítás-kalibráció 30 kockán:** a maradékot úgyis az AP-mérés veszi át.
+
+A videón a kromatikus aberráció érdemi volt: R legfeljebb 1,06 px, B legfeljebb 0,68 px. Ezt a program képkockánként korrigálta.
+
 ## Eredmények v0.2-vel
 
 v0.2 újdonságai: torzítás-önkalibráció, fényességmegőrzés, kromatikus aberráció, ásványi hold, grafikus felület.

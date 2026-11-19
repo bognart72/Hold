@@ -29,8 +29,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("holdstack – Hold-stackelő")
-        self.geometry("1280x860")
-        self.minsize(980, 640)
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w, h = min(1280, sw - 40), min(860, sh - 90)
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - 20)}")
+        self.minsize(min(980, w), min(600, h))
         self.proc = None
         self.q = queue.Queue()
         self.photos = {}
@@ -114,7 +116,8 @@ class App(tk.Tk):
         self.btn_run.pack(side=tk.LEFT)
         self.btn_stop = ttk.Button(ctl, text="■  Leállítás", command=self._stop, state=tk.DISABLED)
         self.btn_stop.pack(side=tk.LEFT, padx=6)
-        ttk.Button(ctl, text="Kimeneti mappa megnyitása", command=self._open_out).pack(side=tk.LEFT)
+        ttk.Button(ctl, text="Eredmény betöltése", command=self._load_existing).pack(side=tk.LEFT)
+        ttk.Button(ctl, text="Mappa", command=self._open_out).pack(side=tk.LEFT, padx=(6, 0))
 
         self.stage = tk.StringVar(value="Várakozás")
         ttk.Label(left, textvariable=self.stage, font=("Segoe UI", 10, "bold")).pack(anchor="w", pady=(10, 2))
@@ -123,9 +126,14 @@ class App(tk.Tk):
         self.elapsed = tk.StringVar(value="")
         ttk.Label(left, textvariable=self.elapsed, foreground="#666").pack(anchor="w")
 
-        self.summary = tk.Text(left, height=12, width=56, wrap="word", font=("Consolas", 9),
+        sumf = ttk.Frame(left)
+        sumf.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        self.summary = tk.Text(sumf, height=8, width=56, wrap="word", font=("Consolas", 9),
                                relief="flat", background=self.cget("background"))
-        self.summary.pack(fill=tk.BOTH, expand=True, pady=(8, 0))
+        ssb = ttk.Scrollbar(sumf, command=self.summary.yview)
+        self.summary.configure(yscrollcommand=ssb.set)
+        ssb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.summary.pack(fill=tk.BOTH, expand=True)
 
         # jobb oldal: fülek
         self.nb = ttk.Notebook(right)
@@ -138,13 +146,16 @@ class App(tk.Tk):
         sb.pack(side=tk.RIGHT, fill=tk.Y)
         self.log.pack(fill=tk.BOTH, expand=True)
         self.nb.add(logf, text="Napló")
+        # A képek vásznon (Canvas) jelennek meg: a vászon nem veszi fel a kép méretét, így az
+        # átméretezés nem vált ki újabb <Configure> eseményt (nincs végtelen méretezési ciklus).
         self.img_tabs = {}
         for key, title in [("preview", "Eredmény"), ("mineral", "Ásványi hold"), ("aps", "Alignment pontok"),
                            ("torzitas", "Torzítási mező"), ("flat", "Vinyettálás")]:
-            lbl = ttk.Label(self.nb, anchor="center")
-            lbl.bind("<Configure>", lambda e, k=key: self._refit(k))
-            self.nb.add(lbl, text=title)
-            self.img_tabs[key] = [lbl, None]
+            c = tk.Canvas(self.nb, background="#1e1e1e", highlightthickness=0, width=200, height=200)
+            c.bind("<Configure>", lambda e, k=key: self._schedule_refit(k))
+            self.nb.add(c, text=title)
+            # [canvas, PIL kép, utolsó méret, időzítő-azonosító]
+            self.img_tabs[key] = [c, None, None, None]
 
     # ---------------------------------------------------------------- beállítások mentése
     def _load_settings(self):
@@ -190,6 +201,17 @@ class App(tk.Tk):
         if p:
             self.out.set(os.path.normpath(p))
 
+    def _load_existing(self):
+        """Egy korábbi futás eredményének megjelenítése a kimeneti mappából (újrafuttatás nélkül)."""
+        base = os.path.splitext(os.path.basename(os.path.normpath(self.inp.get())))[0]
+        rp = os.path.join(self.out.get(), f"{base}_report.json")
+        if not os.path.exists(rp):
+            messagebox.showinfo("holdstack", f"Nincs eredmény ebben a mappában:\n{rp}")
+            return
+        self.summary.delete("1.0", tk.END)
+        self.stage.set("Korábbi eredmény betöltve")
+        self._show_results()
+
     def _open_out(self):
         p = self.out.get()
         if p and os.path.isdir(p):
@@ -228,7 +250,8 @@ class App(tk.Tk):
         self.summary.delete("1.0", tk.END)
         for k in self.img_tabs:
             self.img_tabs[k][1] = None
-            self.img_tabs[k][0].configure(image="", text="")
+            self.img_tabs[k][2] = None
+            self.img_tabs[k][0].delete("all")
         self.nb.select(0)
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
         cmd = self._args()
@@ -261,8 +284,8 @@ class App(tk.Tk):
             while True:
                 kind, val = self.q.get_nowait()
                 if kind == "line":
-                    self._append(val)
                     m = PROG_RE.search(val)
+                    self._append(PROG_RE.sub("", val).rstrip() + "\n")
                     t = TIME_RE.match(val.strip())
                     if t:
                         self.elapsed.set(f"Eltelt idő: {float(t.group(1)):.0f} s")
@@ -300,12 +323,15 @@ class App(tk.Tk):
                      torzitas=f"{base}_torzitas.png", flat=f"{base}_flat.png")
         for k, fn in files.items():
             p = os.path.join(out, fn)
-            lbl = self.img_tabs[k][0]
             if os.path.exists(p):
-                self.img_tabs[k][1] = Image.open(p).convert("RGB")
-                self._refit(k)
+                im = Image.open(p).convert("RGB")
+                im.thumbnail((2000, 2000))  # a megjelenítéshez elég; gyorsabb újraméretezés
+                self.img_tabs[k][1] = im
+                self.img_tabs[k][2] = None
+                self._refit(k, force=True)
             else:
-                lbl.configure(image="", text="(ehhez a futáshoz nincs ilyen kép)")
+                self.img_tabs[k][1] = None
+                self._set_message(k, "(ehhez a futáshoz nincs ilyen kép)")
         self.nb.select(1)
         rp = os.path.join(out, f"{base}_report.json")
         try:
@@ -339,16 +365,34 @@ class App(tk.Tk):
         lines.append(f"\nFájlok: {out}")
         self.summary.insert("1.0", "\n".join(lines))
 
-    def _refit(self, key):
-        lbl, img = self.img_tabs[key]
+    def _schedule_refit(self, key):
+        """Késleltetett újraméretezés: ablakhúzás közben csak egyszer, a végén fut le."""
+        t = self.img_tabs[key]
+        if t[3] is not None:
+            self.after_cancel(t[3])
+        t[3] = self.after(150, lambda: self._refit(key))
+
+    def _set_message(self, key, text):
+        c = self.img_tabs[key][0]
+        c.delete("all")
+        c.create_text(c.winfo_width() // 2, c.winfo_height() // 2, text=text, fill="#bbb")
+
+    def _refit(self, key, force=False):
+        t = self.img_tabs[key]
+        c, img = t[0], t[1]
+        t[3] = None
         if img is None:
             return
-        w, h = max(lbl.winfo_width(), 50), max(lbl.winfo_height(), 50)
+        w, h = max(c.winfo_width(), 50), max(c.winfo_height(), 50)
+        if not force and t[2] == (w, h):
+            return  # nincs valódi méretváltozás
+        t[2] = (w, h)
         s = min(w / img.width, h / img.height)
-        im = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))), Image.LANCZOS)
+        im = img.resize((max(1, int(img.width * s)), max(1, int(img.height * s))), Image.BILINEAR)
         ph = ImageTk.PhotoImage(im)
         self.photos[key] = ph
-        lbl.configure(image=ph, text="")
+        c.delete("all")
+        c.create_image(w // 2, h // 2, image=ph, anchor="center")
 
     def _on_close(self):
         if self.proc and self.proc.poll() is None:

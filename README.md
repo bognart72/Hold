@@ -34,6 +34,8 @@ A felület részei:
 - Bemenet: videófájl vagy képmappa, és a kimeneti mappa tallózással.
 - Az összes fontos beállítás. A felület a legutóbbi értékeket megjegyzi (`~/.holdstack_gui.json`).
 - **Indítás / Leállítás**, élő napló, szakaszonkénti haladásjelző és eltelt idő.
+- **Eredmény betöltése**: egy korábbi futás eredményét jeleníti meg a kimeneti mappából, újrafuttatás nélkül.
+- Az ablakméret a képernyőhöz igazodik.
 - A végén összefoglaló és fülek az eredményképekkel: élesített stack, alignment pontok, torzítási mező, vinyettálás.
 
 A feldolgozás külön folyamatban fut, ugyanazzal a parancssori programmal.

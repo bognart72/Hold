@@ -69,13 +69,13 @@ def measure(warped, valid, ref_blur, aps, half_box, search, min_corr=0.5):
     return shifts, ok, corr
 
 
-def local_quality(gray_frame, H_full, aps, half_box):
-    """AP-nkénti élesség az EREDETI (nem interpolált) képkockán: Laplace-var / átlag²."""
+def local_quality_at(gray_frame, pts, half_box):
+    """AP-nkénti élesség az EREDETI (nem interpolált) képkockán: Laplace-var / átlag².
+    pts: az AP-k helye a képkockában (N,2) [x, y]."""
     gb = cv2.GaussianBlur(gray_frame, (0, 0), 1.5)
     lap = cv2.Laplacian(gb, cv2.CV_32F)
-    pts = cv2.perspectiveTransform(aps[:, ::-1].astype(np.float32)[None], H_full)[0]
     Hh, Ww = gray_frame.shape
-    q = np.zeros(len(aps), np.float32)
+    q = np.zeros(len(pts), np.float32)
     hb = half_box
     for a, (x, y) in enumerate(pts):
         xi, yi = int(round(x)), int(round(y))

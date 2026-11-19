@@ -79,9 +79,14 @@ def calibrate(smalls, masks, Hs_small, frames, ref_i, deg=3, nsamp=5000, seed=0)
     res = Y - B @ c - r[J]
     gains = {int(k): float(np.median(res[K == k])) for k in frames if np.any(K == k)}
     # a flat terjedelme a ténylegesen bejárt területen
-    gv = np.exp(B @ c)
-    return dict(enabled=True, coef=c.tolist(), deg=deg, gains=gains, rms=float(np.sqrt(np.mean(res ** 2))),
-                spread=spread, g_min=float(gv.min()), g_max=float(gv.max()), msg="ok")
+    # Normálás: a Hold által ténylegesen bejárt helyeken a flat átlaga 1 legyen,
+    # így a korrekció nem világosítja/sötétíti összességében a képet (nincs fényesség-növekedés).
+    logg = B @ c
+    norm = float(np.mean(logg))
+    gv = np.exp(logg - norm)
+    return dict(enabled=True, coef=c.tolist(), deg=deg, norm=norm, gains=gains,
+                rms=float(np.sqrt(np.mean(res ** 2))), spread=spread,
+                g_min=float(gv.min()), g_max=float(gv.max()), msg="ok")
 
 
 def flat_field(calib, W, H):
@@ -95,4 +100,5 @@ def flat_field(calib, W, H):
     logg = np.zeros((H, W), np.float32)
     for (i, j), cc in zip(_terms(calib["deg"]), calib["coef"]):
         logg += np.float32(cc) * (u ** i) * (v ** j)
+    logg -= np.float32(calib.get("norm", 0.0))
     return np.clip(np.exp(logg), 0.3, 3.0).astype(np.float32)

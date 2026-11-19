@@ -18,6 +18,8 @@ from tkinter import ttk, filedialog, messagebox
 
 from PIL import Image, ImageTk
 
+from .autotune import DEFAULTS
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SETTINGS = os.path.join(os.path.expanduser("~"), ".holdstack_gui.json")
 VIDEO_TYPES = [("Videó", "*.mp4 *.mov *.avi *.mkv *.ser *.m4v"), ("Minden fájl", "*.*")]
@@ -108,6 +110,11 @@ class App(tk.Tk):
             v = tk.BooleanVar(value=default)
             ttk.Checkbutton(opt, text=text, variable=v).grid(row=r, column=0, columnspan=3, sticky="w")
             self.flags[key] = v
+        tune = ttk.Frame(opt)
+        tune.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        self.btn_tune = ttk.Button(tune, text="Hangolás ehhez a felvételhez", command=self._start_tune)
+        self.btn_tune.pack(side=tk.LEFT)
+        ttk.Button(tune, text="Alapértékek", command=self._reset_defaults).pack(side=tk.LEFT, padx=6)
 
         # vezérlés
         ctl = ttk.Frame(left)
@@ -201,6 +208,52 @@ class App(tk.Tk):
         if p:
             self.out.set(os.path.normpath(p))
 
+    # ---------------------------------------------------------------- alapértékek, hangolás
+    def _reset_defaults(self):
+        for k in ("percent", "min_frames", "candidates", "half_box", "search", "knee", "defringe", "sharpen"):
+            self.vars[k].set(str(DEFAULTS[k]))
+        self.vars["mineral"].set("4.0")
+        for k in ("refine", "flat", "distortion", "ca", "gain"):
+            self.flags[k].set(bool(DEFAULTS[k]))
+        self.flags["mineral"].set(False)
+        self.flags["stretch"].set(False)
+        self._save_settings()
+        self.summary.delete("1.0", tk.END)
+        self.summary.insert("1.0", "Az alapértékek visszaállítva.")
+        self.stage.set("Alapértékek")
+        self.pbar["value"] = 0
+        self.elapsed.set("")
+
+    def _start_tune(self):
+        inp = self.inp.get()
+        if not inp or not os.path.exists(inp):
+            messagebox.showerror("holdstack", "Előbb válassz videót vagy képmappát.")
+            return
+        self._tune_json = os.path.join(os.path.expanduser("~"), ".holdstack_tune.json")
+        try:
+            os.remove(self._tune_json)
+        except OSError:
+            pass
+        self._launch([sys.executable, "-u", "-m", "holdstack.autotune", inp, "--json", self._tune_json], job="tune")
+        self.stage.set("Hangolás: a felvétel elemzése…")
+
+    def _apply_tune(self):
+        try:
+            with open(self._tune_json, encoding="utf-8") as fh:
+                t = json.load(fh)
+        except Exception as e:
+            messagebox.showerror("holdstack", f"A hangolás eredménye nem olvasható: {e}")
+            return
+        p = t["params"]
+        for k in ("percent", "min_frames", "candidates", "half_box", "search", "knee", "defringe", "sharpen"):
+            self.vars[k].set(str(p[k]))
+        for k in ("flat", "distortion"):
+            self.flags[k].set(bool(p[k]))
+        self._save_settings()
+        self.summary.delete("1.0", tk.END)
+        self.summary.insert("1.0", "A felvételhez hangolt beállítások betöltve:\n\n- " + "\n- ".join(t["reasons"]))
+        self.stage.set("Hangolás kész – a beállítások a mezőkben")
+
     def _load_existing(self):
         """Egy korábbi futás eredményének megjelenítése a kimeneti mappából (újrafuttatás nélkül)."""
         base = os.path.splitext(os.path.basename(os.path.normpath(self.inp.get())))[0]
@@ -252,16 +305,22 @@ class App(tk.Tk):
             self.img_tabs[k][1] = None
             self.img_tabs[k][2] = None
             self.img_tabs[k][0].delete("all")
+        self._launch(self._args(), job="stack")
+        self.stage.set("Indul…")
+
+    def _launch(self, cmd, job):
+        """Külön folyamat indítása (stack vagy hangolás), élő naplóval."""
+        self.job = job
+        self.log.delete("1.0", tk.END)
         self.nb.select(0)
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
-        cmd = self._args()
         self._append("> " + " ".join(f'"{c}"' if " " in c else c for c in cmd) + "\n")
         self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
         self.btn_run.configure(state=tk.DISABLED)
+        self.btn_tune.configure(state=tk.DISABLED)
         self.btn_stop.configure(state=tk.NORMAL)
-        self.stage.set("Indul…")
         self.pbar["value"] = 0
 
     def _reader(self, proc):
@@ -306,13 +365,17 @@ class App(tk.Tk):
 
     def _finished(self, code):
         self.btn_run.configure(state=tk.NORMAL)
+        self.btn_tune.configure(state=tk.NORMAL)
         self.btn_stop.configure(state=tk.DISABLED)
         self.proc = None
         if code != 0:
             self.stage.set(f"Hiba vagy leállítás (kód {code})")
             return
-        self.stage.set("Kész")
         self.pbar["value"] = 100
+        if getattr(self, "job", "stack") == "tune":
+            self._apply_tune()
+            return
+        self.stage.set("Kész")
         self._show_results()
 
     # ---------------------------------------------------------------- eredmények

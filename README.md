@@ -35,6 +35,9 @@ A felület részei:
 - Az összes fontos beállítás. A felület a legutóbbi értékeket megjegyzi (`~/.holdstack_gui.json`).
 - **Indítás / Leállítás**, élő napló, szakaszonkénti haladásjelző és eltelt idő.
 - **Eredmény betöltése**: egy korábbi futás eredményét jeleníti meg a kimeneti mappából, újrafuttatás nélkül.
+- **Hangolás ehhez a felvételhez**: gyors előzetes elemzés, utána a javasolt értékek a mezőkbe kerülnek, az indoklással együtt. Részletek lent.
+- **Alapértékek**: visszaállítja a gyári beállításokat.
+- A felület a legutóbb használt értékekkel indul (`~/.holdstack_gui.json`).
 - Az ablakméret a képernyőhöz igazodik.
 - A végén összefoglaló és fülek az eredményképekkel: élesített stack, alignment pontok, torzítási mező, vinyettálás.
 
@@ -52,6 +55,45 @@ python -m holdstack Teszt_kepek -o eredmeny\Teszt_kepek
 
 A bemenet lehet videófájl (mp4/mov/avi…) vagy képeket tartalmazó mappa (jpg/png/tif).
 A képeket az EXIF-időbélyeg szerint rendezi, és alkalmazza az EXIF-forgatást.
+
+### Hangolás az adott felvételhez (`--auto`)
+
+```powershell
+python -m holdstack Video\h001.mp4 -o eredmeny\h001 --auto
+```
+
+```powershell
+python -m holdstack.autotune Video\h001.mp4 --json javaslat.json
+```
+
+Az első parancs hangolás után a javasolt értékekkel fut. A második csak a javaslatot írja ki, és elmenti JSON-ba.
+
+A hangolás gyors előzetes elemzés: videónál ~80 mintakocka, fotóknál mind. Videónál kb. 1 perc. A mért jellemzőkből ezeket a paramétereket állítja be:
+
+| Mért jellemző | Paraméter |
+|---|---|
+| Hold-átmérő (px) | AP-box ≈ átmérő/52 (16–64 px) |
+| helyi eltolások a globális illesztés után (11 kockán, ±40 px kereséssel) | keresési sugár ≈ 1,5 × a legnagyobb eltolás + 4 px |
+| élesség-eloszlás, képkockaszám | legjobb %, legalább ennyi kocka, jelöltek % |
+| a Hold vándorlása a képen | flat- és torzítás-kalibráció be/ki (1,5%-nál kisebb szórásnál ki) |
+| színcsatorna-eltolás (CA) | színszegély-csillapítás 0,3 / 0,5 / 0,7 |
+| beégett pixelek a bemeneten | csúcsfény-levágás 0,85 / 0,80 |
+| zajszint × a stackelt kockák száma | élesítés: visszafogott / közepes / erős |
+
+A kifejezetten megadott opció a hangolt értéket is felülírja, például `--auto --percent 25`.
+
+**Mért hatás (17 fotó, alap vs. `--auto`):**
+
+| | Alap (box 32, keresés 16, 20%) | Hangolt (box 56, keresés 22, 30%) |
+|---|---|---|
+| Megbízható AP-mérés | 96,5% | 97,1% |
+| Helyi eltolás p95 | 5,12 px | 4,80 px |
+| Zaj | 0,0031 | 0,0029 (−6%) |
+| Élességmérték | 3,03e-5 | 2,85e-5 (−6%) |
+
+A hangolás itt stabilabb mérést és kevesebb zajt adott, de kissé kisebb élességet. Szemre a két kép szinte azonos. A nagyobb AP-box durvábban követi a helyi torzulást. Ez egy szabályalapú első becslés. Pontosabb lenne, ha a program néhány beállítást ténylegesen kipróbálna egy részhalmazon, és a jobbat választaná.
+
+Példa: a mintavideóra 36 px-es AP-boxot, 13 px-es keresést, erős élesítést és 0,7-es színszegély-csillapítást javasol. A 17 fotóra 56 px-es boxot (a digitális zoom miatt ~2980 px a Hold), 22 px-es keresést, 30%-ot és legalább 5 képet.
 
 ### Fontosabb opciók
 

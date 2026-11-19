@@ -81,3 +81,18 @@ A képeket az EXIF-időbélyeg szerint rendezi, és alkalmazza az EXIF-forgatás
 9. **Mentés:** kivágás, 16 bites TIFF, wavelet-élesítés.
 
 Részletes háttér, szakirodalom és mérések: `KUTATAS_es_TERV.md`.
+
+## Eddigi eredmények (v0.1)
+
+| Bemenet | Felvétel | Eredmény | Futásidő |
+|---|---|---|---|
+| Videó, 21 s, 620 kocka, 4K H.264, Samsung | Dobson + telefon az okulárban | 310 jelölt, 881 AP, 100% sikeres AP-mérés, a lokális eltolás mediánja 0,77 px (p95: 2,7 px). Nincs dupla kontúr, részletgazdagabb, mint a legjobb egyedi képkocka. | ~23 perc |
+| 17 JPG, 4000×3000, digitális zoom 1,72× | ugyanaz, egyedi fotók | 956 AP, 99,9% sikeres mérés, a becsült vinyettálás 0,75…1,14. Nincs dupla kontúr, kb. 20%-kal kisebb a zaj. | ~2,5 perc |
+
+**Ismert korlátok és következő lépések:**
+- Lassú 4K videón (~23 perc).
+  - A globális ECC illesztés ritkítható: szomszédos képkockák kezdőértéke, kisebb piramis.
+  - Az AP-mérés vektorizálható vagy GPU-ra vihető.
+- A szenzorhoz kötött nemlineáris torzítást most a homográfia és a lokális AP-mező együtt kezeli. A külön torzítás-önkalibráció még hiányzik.
+- Szintetikus tesztvideó-generátor a pixelpontosság számszerű ellenőrzéséhez.
+- RAW/DNG bemenet, sigma-clipping, drizzle, RGB-csatornák lokális igazítása, grafikus felület.

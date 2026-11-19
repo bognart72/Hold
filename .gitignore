@@ -1,0 +1,17 @@
+# Bemeneti adatok és eredmények: nagyok, és GPS/helyadatot tartalmazhatnak
+Video/
+Teszt_kepek/
+elemzes/
+eredmeny/
+*.mp4
+*.mov
+*.avi
+*.ser
+*.jpg
+*.tif
+*.tiff
+
+# Python
+__pycache__/
+*.pyc
+.venv/

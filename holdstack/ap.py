@@ -69,6 +69,11 @@ def measure(warped, valid, ref_blur, aps, half_box, search, min_corr=0.5):
     return shifts, ok, corr
 
 
+def _box_sums(img_int, y0, x0, h, w):
+    """Téglalap-összegek integrálképből, vektorosan (y0, x0: tömbök)."""
+    return (img_int[y0 + h, x0 + w] - img_int[y0, x0 + w] - img_int[y0 + h, x0] + img_int[y0, x0])
+
+
 def local_quality_at(gray_frame, pts, half_box):
     """AP-nkénti élesség az EREDETI (nem interpolált) képkockán: Laplace-var / átlag².
     pts: az AP-k helye a képkockában (N,2) [x, y]."""
@@ -81,17 +86,26 @@ def local_quality_at(gray_frame, pts, half_box):
     Y0 = int(max(0, np.floor(pts[:, 1].min()) - pad)); Y1 = int(min(Hh, np.ceil(pts[:, 1].max()) + pad))
     if X1 <= X0 or Y1 <= Y0:
         return q
-    gb = np.zeros_like(gray_frame); lap = np.zeros_like(gray_frame)
-    gb[Y0:Y1, X0:X1] = cv2.GaussianBlur(gray_frame[Y0:Y1, X0:X1], (0, 0), 1.5)
-    lap[Y0:Y1, X0:X1] = cv2.Laplacian(gb[Y0:Y1, X0:X1], cv2.CV_32F)
-    for a, (x, y) in enumerate(pts):
-        xi, yi = int(round(x)), int(round(y))
-        if yi - hb < Y0 or xi - hb < X0 or yi + hb > Y1 or xi + hb > X1:
-            continue
-        box = gb[yi - hb:yi + hb, xi - hb:xi + hb]
-        mu = box.mean()
-        if mu > 1e-3:
-            q[a] = lap[yi - hb:yi + hb, xi - hb:xi + hb].var() / (mu * mu)
+    gb = cv2.GaussianBlur(gray_frame[Y0:Y1, X0:X1], (0, 0), 1.5)
+    lap = cv2.Laplacian(gb, cv2.CV_32F)
+    # integrálképekkel az összes AP-box összege egyszerre (nincs Python-ciklus AP-nként)
+    Ig = cv2.integral(gb, sdepth=cv2.CV_64F)
+    Il = cv2.integral(lap, sdepth=cv2.CV_64F)
+    Il2 = cv2.integral(lap * lap, sdepth=cv2.CV_64F)
+    xi = np.round(pts[:, 0]).astype(np.int64) - X0
+    yi = np.round(pts[:, 1]).astype(np.int64) - Y0
+    T = 2 * hb
+    inb = (yi - hb >= 0) & (xi - hb >= 0) & (yi + hb <= Y1 - Y0) & (xi + hb <= X1 - X0)
+    a = np.nonzero(inb)[0]
+    if len(a) == 0:
+        return q
+    by, bx = yi[a] - hb, xi[a] - hb
+    n = float(T * T)
+    mu = _box_sums(Ig, by, bx, T, T) / n
+    ml = _box_sums(Il, by, bx, T, T) / n
+    var = _box_sums(Il2, by, bx, T, T) / n - ml * ml
+    good = mu > 1e-3
+    q[a[good]] = (var[good] / (mu[good] ** 2)).astype(np.float32)
     return q
 
 
@@ -162,10 +176,21 @@ class Field:
 
     def __init__(self, aps, shape, step):
         self.H, self.W = shape
-        self.f = max(2, step // 6)
+        # Durva rács: lépés/4 (2..8 px). A σ = 0.75·lépés simítású mező lineáris felskálázási hibája
+        # ~ A·f²/(8σ²): lépés/4 rácsnál ~0.02 px alatt marad (minőség az első; a 8 px-es felső korlát
+        # csak nagy AP-lépésnél lép életbe, ahol a hiba így is elhanyagolható).
+        self.f = int(np.clip(step // 4, 2, 8))
         self.hs = math.ceil(self.H / self.f); self.ws = math.ceil(self.W / self.f)
-        self.yi = np.clip(np.round((aps[:, 0] - (self.f - 1) / 2) / self.f).astype(int), 0, self.hs - 1)
-        self.xi = np.clip(np.round((aps[:, 1] - (self.f - 1) / 2) / self.f).astype(int), 0, self.ws - 1)
+        # bilineáris szétosztás a 4 szomszédos durva cellára (pontos AP-hely, nincs kerekítési hiba)
+        fy = (aps[:, 0] - (self.f - 1) / 2) / self.f
+        fx = (aps[:, 1] - (self.f - 1) / 2) / self.f
+        y0 = np.floor(fy).astype(int); x0 = np.floor(fx).astype(int)
+        wy = (fy - y0).astype(np.float32); wx = (fx - x0).astype(np.float32)
+        self._iy = [np.clip(y0, 0, self.hs - 1), np.clip(y0 + 1, 0, self.hs - 1)]
+        self._ix = [np.clip(x0, 0, self.ws - 1), np.clip(x0 + 1, 0, self.ws - 1)]
+        self._wy = [1 - wy, wy]; self._wx = [1 - wx, wx]
+        self.yi = np.clip(np.round(fy).astype(int), 0, self.hs - 1)
+        self.xi = np.clip(np.round(fx).astype(int), 0, self.ws - 1)
         self.sigma = 0.75 * step / self.f
         den = self._conv(np.ones(len(aps), np.float32))
         self.den = den
@@ -174,7 +199,9 @@ class Field:
 
     def _conv(self, vals):
         g = np.zeros((self.hs, self.ws), np.float32)
-        np.add.at(g, (self.yi, self.xi), vals)
+        for a in range(2):
+            for b in range(2):
+                np.add.at(g, (self._iy[a], self._ix[b]), vals * self._wy[a] * self._wx[b])
         return cv2.GaussianBlur(g, (0, 0), self.sigma)
 
     def up(self, coarse):

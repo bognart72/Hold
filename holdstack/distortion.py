@@ -32,6 +32,12 @@ class Distortion:
         self.terms = _terms(deg)
         self._dmap = None
 
+    def __getstate__(self):
+        # a nagy, újraszámolható D-táblázat ne utazzon a folyamatok között
+        st = self.__dict__.copy()
+        st["_dmap"] = None
+        return st
+
     def _delta(self, x, y):
         a = (x - self.cx) / self.s
         b = (y - self.cy) / self.s
@@ -112,7 +118,15 @@ class FrameMap:
         mx = (h[0, 0] * xs + h[0, 1] * ys + h[0, 2]) / z
         my = (h[1, 0] * xs + h[1, 1] * ys + h[1, 2]) / z
         if self.dist is not None:
-            mx, my = self.dist.D_xy(mx, my)
+            if np.size(mx) > 4096:
+                # nagy tömbre: az előre kiszámolt sűrű D-táblázatból bilineáris kiolvasás (sima mező,
+                # 1 px-es rácson a hiba elhanyagolható), az iteratív inverz helyett
+                Dx, Dy, P = self.dist.dense_D()
+                px = (mx + P).astype(np.float32); py = (my + P).astype(np.float32)
+                mx = cv2.remap(Dx, px, py, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float64)
+                my = cv2.remap(Dy, px, py, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE).astype(np.float64)
+            else:
+                mx, my = self.dist.D_xy(mx, my)
         return mx, my
 
     def warp(self, img, W, H, coarse=None, interp=cv2.INTER_LINEAR, border=-1.0):
@@ -146,7 +160,7 @@ class CoarseGrid:
         return self.up(mx), self.up(my)
 
 
-def calibrate(corr, W, H, deg=3, ridge=1e-4, max_pts=400, seed=0):
+def calibrate(corr, W, H, deg=3, ridge=1e-4, max_pts=600, seed=0):
     """corr: lista (x_ref (N,2), x_k (N,2)) teljes felbontású px-ben, képkockánként.
     Visszaad: (Distortion | None, info dict)."""
     rng = np.random.default_rng(seed)

@@ -48,7 +48,7 @@ class Config:
     gain: bool = True              # képkockánkénti erősítés-kiegyenlítés
     distortion: bool = True        # szenzorhoz rögzített geometriai torzítás önkalibrációja
     dist_deg: int = 3
-    dist_frames: int = 30          # ennyi (időben egyenletesen választott) képkockából kalibrál
+    dist_frames: int = 60          # ennyi (időben egyenletesen választott) képkockából kalibrál (30-cal mérhetően rosszabb)
     ca: bool = True                # kromatikus aberráció (laterális CA + légköri diszperzió) korrekciója
     ca_frames: int = 16            # ennyi képkockából méri a CA-mezőt
     defringe: float = 0.5          # színszegély-csillapítás erőssége az élesített képen (0 = ki)
@@ -58,6 +58,7 @@ class Config:
     trial_only: bool = False       # csak kalibráció: a javaslatot elmenti, stack nem készül
     trial_frames: int = 80         # legfeljebb ennyi képkockán fut a kalibráció
     trial_tile: int = 1024         # a kalibrációs csempe mérete (px)
+    processes: bool = True         # AP-mérés külön folyamatokban (GIL nélkül, valódi párhuzamosság)
     stretch: bool = False          # automatikus széthúzás (alapból KI: a fényesség = a bemenetével)
     knee: float = 0.85             # lágy csúcsfény-levágás kezdete az élesített képen
     workers: int = 0
@@ -100,12 +101,39 @@ def _pmap(src, indices, fn, workers, depth=None, label=None):
             yield r
 
 
+def _ppmap(src, indices, ctx, nproc, label=None):
+    """Mint a _pmap, de külön FOLYAMATOKBAN (holdstack.worker.measure_frame): a GIL-kötött
+    AP-mérés így valóban párhuzamos. A képkockákat a fő folyamat olvassa, sorrendben adja vissza."""
+    from concurrent.futures import ProcessPoolExecutor
+    from . import worker
+    total = len(indices)
+    step = max(1, total // 10)
+    done = 0
+    q = deque()
+    depth = nproc * 2
+    with ProcessPoolExecutor(nproc, initializer=worker.init, initargs=(ctx,)) as ex:
+        def tick():
+            nonlocal done
+            done += 1
+            if label and (done % step == 0 or done == total):
+                print(f"[{time.time() - _T0[0]:7.1f}s]   {label}: {done}/{total}  PROGRESS {done}/{total}", flush=True)
+        for i, raw in src.frames(indices):
+            q.append(ex.submit(worker.measure_frame, i, raw))
+            while len(q) > depth:
+                r = q.popleft().result(); tick()
+                yield r
+        while q:
+            r = q.popleft().result(); tick()
+            yield r
+
+
 def run(inp, outdir, cfg: Config = Config()):
     t0 = time.time()
     _T0[0] = t0
     cfg = replace(cfg)  # a kalibráció módosíthatja; a hívó példánya érintetlen marad
     os.makedirs(outdir, exist_ok=True)
     workers = cfg.workers or max(1, min(6, (os.cpu_count() or 2) - 1))
+    nproc = cfg.workers or max(1, min(8, (os.cpu_count() or 2) - 1))
     src = Source(inp)
     H, W = src.shape
     ds = cfg.ds
@@ -279,7 +307,13 @@ def run(inp, outdir, cfg: Config = Config()):
             pts = maps[i].points(aps[:, ::-1].astype(np.float64))
             return i, s, o, apmod.local_quality_at(g, pts, cfg.half_box)
 
-        for i, s, o, qq in _pmap(src, frames, one, workers, label=label):
+        if cfg.processes and len(frames) >= 20 and nproc > 1:
+            ctx = dict(inv_g=inv_g, gains=gains, maps={i: maps[i] for i in frames}, W=cv["W"], H=cv["H"],
+                       cg=cv["cg"], refb=refb, aps=aps, hb=cfg.half_box, search=cfg.search, min_corr=cfg.min_corr)
+            it = _ppmap(src, frames, ctx, nproc, label)
+        else:
+            it = _pmap(src, frames, one, workers, label=label)
+        for i, s, o, qq in it:
             k = pos[i]
             sh[k], ok[k], q[k] = s, o, qq
         return sh, ok, q
@@ -320,6 +354,7 @@ def run(inp, outdir, cfg: Config = Config()):
             corr.append((xr, xk))
         dist, dinfo = distmod.calibrate(corr, W, H, deg=cfg.dist_deg)
         if dist is not None:
+            dist.dense_D()  # a sűrű D-táblázat egyszer, előre (a szálak ne számolják párhuzamosan)
             ys, xs = np.nonzero(geo.erode(ref_mask, 20))
             sel = np.random.default_rng(1).choice(len(xs), min(4000, len(xs)), replace=False)
             pts_ref = np.stack([xs[sel], ys[sel]], 1).astype(np.float64) + off

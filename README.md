@@ -159,7 +159,37 @@ A teljes képen mérve, alap (64 px, 20%) és kalibrált (24 px, 20%) összevet�
 | Futásidő | 796 s | 1672 s |
 
 - A videón a seeing apró léptékben torzít, ezt a kis AP-box jobban követi. A kiterjesztés itt kellett: a 24 px-es box a kiinduló listában nem is szerepelt.
-- **Ára:** ötször annyi AP, és kétszeres futásidő. Következő feladat a sűrű AP-rács gyorsítása.
+- **Ára:** ötször annyi AP. Ezért készült a v0.5 (lent).
+
+## v0.5 – minőség az első, és gyorsabb sűrű AP-rács
+
+**Elv: a képminőség az elsődleges szempont, a sebesség csak utána.** Gyorsítás csak akkor kerül be, ha a minőségi mutatók nem romlanak.
+
+| Változás | Hatás |
+|---|---|
+| AP-nkénti élességmérés integrálképpel | 1,01 → 0,065 s/kocka (4195 AP), azonos eredmény (eltérés 4e-7) |
+| AP-mérés külön folyamatokban (GIL nélkül) | azonos számítás, valódi párhuzamosság |
+| Torzítás sűrű táblázatból (1 px-es rács, bilineáris) | 1,75 s → ~0,02 s/kocka, hiba < 0,001 px |
+| Eltolási mező rácsa = AP-lépés/4 (2–8 px), bilineáris szétosztás | mintavételi hiba < ~0,02 px |
+| **Visszaállítva minőségért:** ECC finom szint 30 iteráció (12 helyett) | kisebb globális maradék (fotó p95: 4,87 → 4,50 px) |
+| **Visszaállítva minőségért:** torzítás-kalibráció 60 kocka, 600 pont (30/400 helyett) | videó: torzítás-maradék 0,518 → 0,500 px |
+| Kipróbálva és elvetve: kötegelt FFT-s AP-mérés | lassabb volt (1,85 s vs 0,46 s), lapos csúcsoknál eltérő csúcsot adott |
+
+**Videó, kalibrált futás (24 px-es box, 20%):**
+
+| | v0.4 (tegnap) | v0.5 |
+|---|---|---|
+| Részlet | 3,5764e-4 | **3,5968e-4 (+0,6%)** |
+| Élességmérték | 1,3319e-4 | **1,3428e-4 (+0,8%)** |
+| Zaj | 0,00123 | 0,00123 |
+| Torzítás-maradék | 0,518 px | **0,500 px** |
+| Futásidő | 1672 s | **1290 s (−23%)** |
+
+Az alapértékes v0.3-hoz képest (64 px, kalibráció nélkül): részlet +2,4%, élesség +4,3%, zaj −2%.
+
+A mostani leghosszabb lépések a minőségi beállítások miatt vannak:
+- torzítás-illesztés 60 kockán: ~270 s
+- globális ECC 30 iterációval: ~230 s
 
 Példa: a mintavideóra 36 px-es AP-boxot, 13 px-es keresést, erős élesítést és 0,7-es színszegély-csillapítást javasol. A 17 fotóra 56 px-es boxot (a digitális zoom miatt ~2980 px a Hold), 22 px-es keresést, 30%-ot és legalább 5 képet.
 

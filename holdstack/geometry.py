@@ -92,8 +92,9 @@ def align_one(ref_small, ref_mask, ref_kp, ref_desc, small, mask):
         _, H2 = cv2.findTransformECC(r2, s2, (S @ H0 @ Si).astype(np.float32), cv2.MOTION_HOMOGRAPHY,
                                      crit, m2, 3)
         H1 = Si @ H2.astype(np.float64) @ S
-        # a finom szint csak rövid utánhúzás: a maradékot úgyis az AP-mérés viszi
-        crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 12, 1e-5)
+        # finom szint teljes konvergenciáig (minőség az első: a kisebb globális maradék a
+        # helyi AP-mérésnek is jobb kiindulás; 12 iterációval mérhetően nőtt a maradék)
+        crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 1e-6)
         cc, Hw = cv2.findTransformECC(ref_small, s, H1.astype(np.float32), cv2.MOTION_HOMOGRAPHY,
                                       crit, m.astype(np.uint8), 5)
         Hw = Hw.astype(np.float64)

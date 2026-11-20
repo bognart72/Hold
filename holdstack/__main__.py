@@ -14,6 +14,10 @@ def main():
     p.add_argument("input", help="videófájl vagy képeket tartalmazó mappa")
     p.add_argument("-o", "--out", default="eredmeny", help="kimeneti mappa")
     p.add_argument("--auto", action="store_true", help="paraméterek hangolása ehhez a felvételhez a futás előtt")
+    p.add_argument("--trial", action="store_true",
+                   help="próbafuttatásos kalibráció (AP-box × arány mini-stackekkel), majd teljes futás a legjobbal")
+    p.add_argument("--trial-only", action="store_true",
+                   help="csak a próbafuttatásos kalibráció; az eredmény <név>_kalibracio.json, stack nem készül")
     # a hangolható opciók alapértéke None: így tudjuk, mit adott meg kifejezetten a felhasználó
     p.add_argument("--percent", type=float, help=f"AP-nként a legjobb %% (alap: {DEFAULTS['percent']})")
     p.add_argument("--min-frames", type=int, help=f"legalább ennyi kocka (alap: {DEFAULTS['min_frames']})")
@@ -59,7 +63,7 @@ def main():
                  distortion=v["distortion"] and not a.no_distortion, dist_deg=a.dist_deg,
                  stretch=a.stretch, knee=float(v["knee"]), ca=not a.no_ca, defringe=float(v["defringe"]),
                  mineral=a.mineral, sharpen=tuple(float(x) for x in str(v["sharpen"]).split(",")),
-                 workers=a.workers)
+                 trial=a.trial, trial_only=a.trial_only, workers=a.workers)
     run(a.input, a.out, cfg)
 
 

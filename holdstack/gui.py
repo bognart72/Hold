@@ -106,15 +106,18 @@ class App(tk.Tk):
                 ("ca", "Kromatikus aberráció korrekció", True),
                 ("gain", "Képkockánkénti fényesség-kiegyenlítés", True),
                 ("mineral", "Ásványi hold (mineral moon) kép is készüljön", False),
+                ("trial", "Próbafuttatásos kalibráció a futás elején", False),
                 ("stretch", "Automatikus széthúzás (alapból ki – beéghet)", False)], start=9):
             v = tk.BooleanVar(value=default)
             ttk.Checkbutton(opt, text=text, variable=v).grid(row=r, column=0, columnspan=3, sticky="w")
             self.flags[key] = v
         tune = ttk.Frame(opt)
         tune.grid(row=r + 1, column=0, columnspan=3, sticky="w", pady=(6, 0))
-        self.btn_tune = ttk.Button(tune, text="Hangolás ehhez a felvételhez", command=self._start_tune)
+        self.btn_tune = ttk.Button(tune, text="Gyors hangolás", command=self._start_tune)
         self.btn_tune.pack(side=tk.LEFT)
-        ttk.Button(tune, text="Alapértékek", command=self._reset_defaults).pack(side=tk.LEFT, padx=6)
+        self.btn_trial = ttk.Button(tune, text="Kalibráció próbafuttatással", command=self._start_trial)
+        self.btn_trial.pack(side=tk.LEFT, padx=6)
+        ttk.Button(tune, text="Alapértékek", command=self._reset_defaults).pack(side=tk.LEFT)
 
         # vezérlés
         ctl = ttk.Frame(left)
@@ -217,6 +220,7 @@ class App(tk.Tk):
             self.flags[k].set(bool(DEFAULTS[k]))
         self.flags["mineral"].set(False)
         self.flags["stretch"].set(False)
+        self.flags["trial"].set(False)
         self._save_settings()
         self.summary.delete("1.0", tk.END)
         self.summary.insert("1.0", "Az alapértékek visszaállítva.")
@@ -236,6 +240,45 @@ class App(tk.Tk):
             pass
         self._launch([sys.executable, "-u", "-m", "holdstack.autotune", inp, "--json", self._tune_json], job="tune")
         self.stage.set("Hangolás: a felvétel elemzése…")
+
+    def _start_trial(self):
+        inp, out = self.inp.get(), self.out.get()
+        if not inp or not os.path.exists(inp) or not out:
+            messagebox.showerror("holdstack", "Előbb válassz bemenetet és kimeneti mappát.")
+            return
+        base = os.path.splitext(os.path.basename(os.path.normpath(inp)))[0]
+        self._trial_json = os.path.join(out, f"{base}_kalibracio.json")
+        try:
+            os.remove(self._trial_json)
+        except OSError:
+            pass
+        cmd = [a for a in self._args() if a != "--trial"] + ["--trial-only"]
+        self._launch(cmd, job="trial")
+        self.stage.set("Kalibráció próbafuttatással…")
+
+    def _apply_trial(self):
+        try:
+            with open(self._trial_json, encoding="utf-8") as fh:
+                t = json.load(fh)
+        except Exception as e:
+            messagebox.showerror("holdstack", f"A kalibráció eredménye nem olvasható: {e}")
+            return
+        b = t["best"]
+        self.vars["half_box"].set(str(b["half_box"]))
+        self.vars["percent"].set(f"{b['percent']:g}")
+        self._save_settings()
+        rows = sorted(t["trials"], key=lambda r: -r["score"])
+        lines = [f"Kalibráció kész ({t['frames']} kocka, csempe {t['tile'][2]}x{t['tile'][3]} px).",
+                 f"Legjobb: AP-box {2 * b['half_box']} px, legjobb {b['percent']:g}%  "
+                 f"(+{t['gain_percent']:.1f}% a kiinduló beállításhoz képest)", "",
+                 " box   arány   pontszám  relatív   részlet     zaj"]
+        for r in rows:
+            lines.append(f"{2 * r['half_box']:4d}  {r['percent']:5.0f}%  {r['score']:9.4f}  {r['relative'] * 100:6.1f}%"
+                         f"  {r['detail']:.3e}  {r['noise']:.4f}")
+        lines.append("\nA mezőkbe beírtam a legjobb beállítást; az Indítással ezzel fut a teljes feldolgozás.")
+        self.summary.delete("1.0", tk.END)
+        self.summary.insert("1.0", "\n".join(lines))
+        self.stage.set("Kalibráció kész – a beállítások a mezőkben")
 
     def _apply_tune(self):
         try:
@@ -285,6 +328,7 @@ class App(tk.Tk):
         if not f["distortion"]: a.append("--no-distortion")
         if not f["gain"]: a.append("--no-gain")
         if f["stretch"]: a.append("--stretch")
+        if f.get("trial"): a.append("--trial")
         return a
 
     def _start(self):
@@ -320,6 +364,7 @@ class App(tk.Tk):
         threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
         self.btn_run.configure(state=tk.DISABLED)
         self.btn_tune.configure(state=tk.DISABLED)
+        self.btn_trial.configure(state=tk.DISABLED)
         self.btn_stop.configure(state=tk.NORMAL)
         self.pbar["value"] = 0
 
@@ -366,6 +411,7 @@ class App(tk.Tk):
     def _finished(self, code):
         self.btn_run.configure(state=tk.NORMAL)
         self.btn_tune.configure(state=tk.NORMAL)
+        self.btn_trial.configure(state=tk.NORMAL)
         self.btn_stop.configure(state=tk.DISABLED)
         self.proc = None
         if code != 0:
@@ -374,6 +420,9 @@ class App(tk.Tk):
         self.pbar["value"] = 100
         if getattr(self, "job", "stack") == "tune":
             self._apply_tune()
+            return
+        if self.job == "trial":
+            self._apply_trial()
             return
         self.stage.set("Kész")
         self._show_results()

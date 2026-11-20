@@ -8,7 +8,7 @@ import math
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 
 import numpy as np
 import cv2
@@ -54,9 +54,17 @@ class Config:
     defringe: float = 0.5          # színszegély-csillapítás erőssége az élesített képen (0 = ki)
     mineral: float = 0.0           # „mineral moon” színerősítés (0 = ki, tipikusan 3-6)
     sharpen: tuple = (2.0, 1.5, 1.2, 1.0)
+    trial: bool = False            # próbafuttatásos kalibráció (AP-box × arány) a teljes feldolgozás előtt
+    trial_only: bool = False       # csak kalibráció: a javaslatot elmenti, stack nem készül
+    trial_frames: int = 80         # legfeljebb ennyi képkockán fut a kalibráció
+    trial_tile: int = 1024         # a kalibrációs csempe mérete (px)
     stretch: bool = False          # automatikus széthúzás (alapból KI: a fényesség = a bemenetével)
     knee: float = 0.85             # lágy csúcsfény-levágás kezdete az élesített képen
     workers: int = 0
+
+
+def _r4(x):
+    return int(4 * round(x / 4.0))
 
 
 def _log(msg, t0):
@@ -95,6 +103,7 @@ def _pmap(src, indices, fn, workers, depth=None, label=None):
 def run(inp, outdir, cfg: Config = Config()):
     t0 = time.time()
     _T0[0] = t0
+    cfg = replace(cfg)  # a kalibráció módosíthatja; a hívó példánya érintetlen marad
     os.makedirs(outdir, exist_ok=True)
     workers = cfg.workers or max(1, min(6, (os.cpu_count() or 2) - 1))
     src = Source(inp)
@@ -329,6 +338,91 @@ def run(inp, outdir, cfg: Config = Config()):
                  + (f", rms {dinfo['rms_before']:.2f} -> {dinfo['rms_after']:.2f} px" if 'rms_before' in dinfo else "")
                  + ")", t0)
 
+    # ---- 5b. próbafuttatásos kalibráció (AP-box × kiválasztási arány) ---------------------------
+    trial_info = None
+    if cfg.trial or cfg.trial_only:
+        from . import trial as trialmod
+        if len(cand) > cfg.trial_frames:
+            tsel = [cand[j] for j in np.unique(np.round(np.linspace(0, len(cand) - 1, cfg.trial_frames)).astype(int))]
+        else:
+            tsel = list(cand)
+        ty0, tx0, th, tw = trialmod.pick_tile(ref0, ref_mask, cfg.trial_tile)
+        tiles = {}
+        for i, g, w in _pmap(src, tsel, warp_gray, workers, label="kalibrációs kockák"):
+            tiles[i] = w[ty0:ty0 + th, tx0:tx0 + tw].copy()
+        tl = [tiles[i] for i in tsel]
+        tgs = np.array([sharp[i] for i in tsel])
+        ys_m, xs_m = np.nonzero(ref_mask)
+        moon_d = max(ys_m.max() - ys_m.min(), xs_m.max() - xs_m.min())
+        hbs = {24, 32, 48, int(cfg.half_box)}
+        if moon_d > 2400:          # nagy (pl. digitálisan nagyított) Hold: nagyobb box is jelölt
+            hbs.add(64)
+        hbs = sorted(h for h in hbs if 8 * h <= min(th, tw))
+        pcts = sorted({10.0, 20.0, 35.0, float(cfg.stack_percent)}) if len(cand) > 60 else \
+            sorted({30.0, 50.0, 80.0, float(cfg.stack_percent)})
+        tmin = cfg.min_frames if len(cand) <= cfg.trial_frames else \
+            max(3, int(round(cfg.min_frames * len(tsel) / len(cand))))
+        _log(f"próbafuttatásos kalibráció: csempe {tw}x{th} px, {len(tl)} kocka, "
+             f"AP-box {[2 * h for h in hbs]} px × legjobb {pcts} %", t0)
+        targs = (ref0[ty0:ty0 + th, tx0:tx0 + tw], ref_mask[ty0:ty0 + th, tx0:tx0 + tw], tgs)
+        best, trials = trialmod.run_trials(tl, *targs, hbs, pcts, cfg.search, tmin, cfg.struct_rel, cfg.min_corr,
+                                           log=lambda s: _log(s, t0))
+        # ha a győztes a jelöltlista szélén van, abba az irányba tovább próbálunk (legfeljebb 2 kör)
+        min_pct = 100.0 * tmin / max(len(tl), 1)
+        for _round in range(2):
+            if best is None:
+                break
+            tried = {(r["half_box"], r["percent"]) for r in trials}
+            new_hb = []
+            hb_all = sorted({r["half_box"] for r in trials})
+            if best["half_box"] == hb_all[0] and hb_all[0] > 12:
+                new_hb.append(max(12, _r4(best["half_box"] * 0.7)))
+            elif best["half_box"] == hb_all[-1] and 8 * _r4(best["half_box"] * 1.4) <= min(th, tw):
+                new_hb.append(_r4(best["half_box"] * 1.4))
+            new_pct = []
+            p_all = sorted({r["percent"] for r in trials})
+            if best["percent"] == p_all[0] and p_all[0] > min_pct + 1:
+                new_pct.append(max(round(min_pct + 1), round(best["percent"] / 2)))
+            elif best["percent"] == p_all[-1] and p_all[-1] < 95:
+                new_pct.append(min(100.0, round(best["percent"] * 1.3)))
+            combos = [(h, best["percent"]) for h in new_hb] + [(best["half_box"], p) for p in new_pct]
+            combos = [c for c in combos if c not in tried]
+            if not combos:
+                break
+            _log(f"a legjobb a jelöltlista szélén van → további próbák: "
+                 f"{', '.join(f'box {2 * h} px / {p:g}%' for h, p in combos)}", t0)
+            for h, p in combos:
+                b2, r2 = trialmod.run_trials(tl, *targs, [h], [p], cfg.search, tmin, cfg.struct_rel,
+                                             cfg.min_corr, log=lambda s: _log(s, t0))
+                trials += r2
+            best = max(trials, key=lambda r: r["score"])
+        if best is not None:
+            for r in trials:
+                r["relative"] = r["score"] / best["score"]
+        del tiles, tl
+        if best is not None:
+            base_r = next((r for r in trials if r["half_box"] == int(cfg.half_box)
+                           and r["percent"] == float(cfg.stack_percent)), None)
+            gain = (best["score"] / base_r["score"] - 1) * 100 if base_r else float("nan")
+            _log(f"kalibráció eredménye: AP-box {2 * best['half_box']} px, legjobb {best['percent']:g}% "
+                 f"(pontszám +{gain:.1f}% a kiinduló beállításhoz képest)", t0)
+            trial_info = dict(best=best, trials=trials, tile=[tx0, ty0, tw, th], frames=len(tsel),
+                              start=dict(half_box=int(cfg.half_box), percent=float(cfg.stack_percent)),
+                              gain_percent=gain)
+            if cfg.trial_only:
+                base = os.path.splitext(os.path.basename(os.path.normpath(inp)))[0]
+                with open(os.path.join(outdir, f"{base}_kalibracio.json"), "w", encoding="utf-8") as fh:
+                    json.dump(trial_info, fh, ensure_ascii=False, indent=1)
+                _log(f"kész (csak kalibráció): {os.path.join(outdir, base + '_kalibracio.json')}", t0)
+                return dict(trial=trial_info, seconds=time.time() - t0)
+            if best["half_box"] != cfg.half_box:
+                cfg.half_box = best["half_box"]
+                aps, _s, step = apmod.make_grid(ref0, geo.erode(ref_mask, 4), cfg.half_box, cfg.step,
+                                                struct_rel=cfg.struct_rel)
+            cfg.stack_percent = best["percent"]
+        else:
+            _log("kalibráció: nem volt értékelhető próba, marad a kiinduló beállítás", t0)
+
     OW, OH = cv["W"], cv["H"]
     nb = apmod.Neighbors(aps, step)
     field = apmod.Field(aps, (OH, OW), step)
@@ -456,6 +550,7 @@ def run(inp, outdir, cfg: Config = Config()):
         local_shift_px=dict(median=float(np.median(shmag)) if shmag.size else None,
                             p95=float(np.percentile(shmag, 95)) if shmag.size else None),
         flat={k: v for k, v in calib.items() if k != "gains"}, distortion=dinfo, brightness=bright,
+        trial_calibration=trial_info,
         chromatic_aberration=dict(per_frame=cainfo, residual_on_stack=ca2),
         frames_detail=[dict(name=names[i], t=float(ts[i]) if i < len(ts) else None, sharp=sharp[i],
                             saturated=satin[i], candidate=i in cand_pos, ecc=ecc.get(i), method=meth.get(i),

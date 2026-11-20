@@ -91,7 +91,75 @@ A kifejezetten megadott opció a hangolt értéket is felülírja, például `--
 | Zaj | 0,0031 | 0,0029 (−6%) |
 | Élességmérték | 3,03e-5 | 2,85e-5 (−6%) |
 
-A hangolás itt stabilabb mérést és kevesebb zajt adott, de kissé kisebb élességet. Szemre a két kép szinte azonos. A nagyobb AP-box durvábban követi a helyi torzulást. Ez egy szabályalapú első becslés. Pontosabb lenne, ha a program néhány beállítást ténylegesen kipróbálna egy részhalmazon, és a jobbat választaná.
+A hangolás itt stabilabb mérést és kevesebb zajt adott, de kissé kisebb élességet. Szemre a két kép szinte azonos. A nagyobb AP-box durvábban követi a helyi torzulást. Ez egy szabályalapú első becslés.
+
+**Döntés (2026-11-19): a fejlesztés a próbafuttatásos kalibrációval folytatódik.** Lásd lent.
+
+### Próbafuttatásos kalibráció (`--trial`, `--trial-only`)
+
+```powershell
+python -m holdstack Video\h001.mp4 -o eredmeny\h001 --trial
+```
+
+```powershell
+python -m holdstack Teszt_kepek -o eredmeny\kal --trial-only
+```
+
+Az első parancs kalibrál, majd a legjobb beállítással elvégzi a teljes feldolgozást. A második csak kalibrál, és az eredményt a `<név>_kalibracio.json` fájlba menti.
+
+A felületen:
+- **„Kalibráció próbafuttatással”** gomb: csak kalibrál, a legjobb értéket beírja a mezőkbe, és táblázatban mutatja a próbákat.
+- **„Próbafuttatásos kalibráció a futás elején”** jelölőnégyzet: a teljes futás előtt kalibrál.
+
+Működése:
+1. A közös, drága lépések egyszer futnak: elemzés, globális illesztés, flat, CA, torzítás.
+2. A program kiválaszt egy erősen strukturált, 1024×1024 px-es csempét a Holdból. Ezt legfeljebb 80 képkockán (időben egyenletesen) globálisan illesztve kivágja, és a memóriában tartja.
+3. Minden jelölt beállítás valódi mini-stacket kap: AP-mérés, AP-nkénti kiválasztás, warp-mező. A jelöltek:
+   - AP-box: 48 / 64 / 96 px, nagy Holdnál 128 px is.
+   - Kiválasztási arány videónál 10 / 20 / 35%, fotóknál 30 / 50 / 80%. A kiinduló érték mindig szerepel.
+4. Pontszám = középfrekvenciás részlet ÷ √zaj:
+   - részlet = var(G(σ1) − G(σ3)) / átlag²
+   - zaj = robusztus szórás a legmagasabb frekvencián
+5. **Kiterjesztés:** ha a győztes a jelöltlista szélén van (legkisebb vagy legnagyobb box, illetve arány), a program abba az irányba tovább próbál, legfeljebb két körben.
+6. A legjobb pontszámú beállítással folytatódik a futás. A jelentés tartalmazza a teljes próbatáblát és a kiinduló beállításhoz mért javulást.
+
+**Eredmény a 17 fotón** (16 + 1 próba, kb. 30 s):
+
+| AP-box | 20% | 30% | 50% | 80% |
+|---|---|---|---|---|
+| 32 px (kiterjesztés) | 0,0137 | | | |
+| **48 px** | **0,0138** | 0,0137 | 0,0131 | 0,0119 |
+| 64 px (alap) | 0,0137 | 0,0136 | 0,0131 | 0,0118 |
+| 96 px | 0,0135 | 0,0134 | 0,0129 | 0,0117 |
+| 128 px | 0,0134 | 0,0133 | 0,0129 | 0,0117 |
+
+- A box mérete keveset számít. A kiválasztási arány sokat: 80%-nál ~15%-kal gyengébb, mert a gyengébb képek elkenik a részletet.
+- A teljes képen mérve a kalibrált stack részlete +0,9% az alapértékeshez képest, a zaj azonos. A fotóknál az alapértékek már majdnem optimálisak voltak.
+- A szabályalapú `--auto` (112 px-es box, 30%) a leggyengébb volt (részlet −2,5%). A próbafuttatás tehát a megbízhatóbb módszer.
+
+**Eredmény a videón** (620 kocka, 80 kalibrációs kocka, 9 + 2 próba, ~1,5 perc):
+
+| AP-box | 10% | 20% | 35% |
+|---|---|---|---|
+| **24 px** (2. kiterjesztés) | | **0,0200** | |
+| 32 px (1. kiterjesztés) | | 0,0199 | |
+| 48 px | 0,0193 | 0,0196 | 0,0194 |
+| 64 px (alap) | 0,0191 | 0,0193 | 0,0193 |
+| 96 px | 0,0185 | 0,0189 | 0,0189 |
+
+A teljes képen mérve, alap (64 px, 20%) és kalibrált (24 px, 20%) összevetésben:
+
+| | Alap | Kalibrált |
+|---|---|---|
+| Részlet | 3,514e-4 | 3,576e-4 (+1,8%) |
+| Zaj | 0,0013 | 0,0012 (−8%) |
+| Élességmérték | 1,287e-4 | 1,332e-4 (+3,5%) |
+| Beégés | 0% | 0% |
+| AP-k száma | 877 | 4195 |
+| Futásidő | 796 s | 1672 s |
+
+- A videón a seeing apró léptékben torzít, ezt a kis AP-box jobban követi. A kiterjesztés itt kellett: a 24 px-es box a kiinduló listában nem is szerepelt.
+- **Ára:** ötször annyi AP, és kétszeres futásidő. Következő feladat a sűrű AP-rács gyorsítása.
 
 Példa: a mintavideóra 36 px-es AP-boxot, 13 px-es keresést, erős élesítést és 0,7-es színszegély-csillapítást javasol. A 17 fotóra 56 px-es boxot (a digitális zoom miatt ~2980 px a Hold), 22 px-es keresést, 30%-ot és legalább 5 képet.
 

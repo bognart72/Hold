@@ -269,8 +269,9 @@ class App(tk.Tk):
         self._save_settings()
         rows = sorted(t["trials"], key=lambda r: -r["score"])
         lines = [f"Kalibráció kész ({t['frames']} kocka, csempe {t['tile'][2]}x{t['tile'][3]} px).",
-                 f"Legjobb: AP-box {2 * b['half_box']} px, legjobb {b['percent']:g}%  "
-                 f"(+{t['gain_percent']:.1f}% a kiinduló beállításhoz képest)", "",
+                 f"Legjobb: AP-box {2 * b['half_box']} px (félszélesség {b['half_box']}), "
+                 f"legjobb {b['percent']:g}%  (+{t['gain_percent']:.1f}% a kiinduló beállításhoz képest)", "",
+                 "box = teljes AP-box (px), a mezőben a félszélesség áll", "",
                  " box   arány   pontszám  relatív   részlet     zaj"]
         for r in rows:
             lines.append(f"{2 * r['half_box']:4d}  {r['percent']:5.0f}%  {r['score']:9.4f}  {r['relative'] * 100:6.1f}%"
@@ -466,6 +467,16 @@ class App(tk.Tk):
                          f"max korrekció a Holdon {d.get('max_shift_moon_px', 0):.1f} px")
         else:
             lines.append(f"Torzítás: nem alkalmazva ({d.get('msg', '')})")
+        tc = r.get("trial_calibration")
+        if tc:
+            tb = tc["best"]
+            # a kalibrált értékek a mezőkbe (egy következő, kalibráció nélküli futás is ezt használja)
+            self.vars["half_box"].set(str(tb["half_box"]))
+            self.vars["percent"].set(f"{tb['percent']:g}")
+            self._save_settings()
+            lines.append(f"Kalibráció: AP-box {2 * tb['half_box']} px (félszélesség {tb['half_box']}), "
+                         f"legjobb {tb['percent']:g}% – pontszám +{tc['gain_percent']:.1f}% a kiindulóhoz képest "
+                         f"({len(tc['trials'])} próba)")
         ca = r.get("chromatic_aberration", {}).get("per_frame", {})
         if ca.get("enabled"):
             lines.append(f"Kromatikus aberráció: R {ca['R']['mean_shift_px']:.2f} px (max {ca['R']['max_shift_px']:.2f}), "

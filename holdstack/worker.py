@@ -14,6 +14,8 @@ _C = {}
 
 
 def init(ctx):
+    from .sysutil import disable_power_throttling
+    disable_power_throttling()
     cv2.setNumThreads(1)  # a párhuzamosság a folyamatok szintjén van
     _C.clear()
     _C.update(ctx)

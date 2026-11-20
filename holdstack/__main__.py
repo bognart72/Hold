@@ -41,6 +41,8 @@ def main():
                    help="'mineral moon' kép készítése ezzel a színerősítéssel (pl. 4; 0 = nem készül)")
     p.add_argument("--workers", type=int, default=0)
     a = p.parse_args()
+    from .sysutil import disable_power_throttling
+    disable_power_throttling()
 
     v = dict(DEFAULTS)
     if a.auto:

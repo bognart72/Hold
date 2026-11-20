@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -360,20 +361,48 @@ class App(tk.Tk):
         self.nb.select(0)
         env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1")
         self._append("> " + " ".join(f'"{c}"' if " " in c else c for c in cmd) + "\n")
-        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env,
-                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        threading.Thread(target=self._reader, args=(self.proc,), daemon=True).start()
+        # A napló FÁJLBA megy, a felület onnan olvassa: csővel (pipe) a feldolgozás a kiírásnál
+        # várakozhat, ha a felület épp nem üríti a kis Windows-csőpuffert (mérve: ~25% lassulás).
+        # A folyamat leválasztva indul (DETACHED_PROCESS), ne örökölje a GUI ütemezési állapotát.
+        import tempfile
+        self._logpath = os.path.join(tempfile.gettempdir(), f"holdstack_gui_{os.getpid()}_{int(time.time())}.log")
+        logf = open(self._logpath, "wb")
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        self.proc = subprocess.Popen(cmd, cwd=ROOT, stdout=logf, stderr=subprocess.STDOUT,
+                                     stdin=subprocess.DEVNULL, env=env, creationflags=flags)
+        logf.close()  # a gyermek saját példánya nyitva marad
+        threading.Thread(target=self._reader, args=(self.proc, self._logpath), daemon=True).start()
         self.btn_run.configure(state=tk.DISABLED)
         self.btn_tune.configure(state=tk.DISABLED)
         self.btn_trial.configure(state=tk.DISABLED)
         self.btn_stop.configure(state=tk.NORMAL)
         self.pbar["value"] = 0
 
-    def _reader(self, proc):
-        for raw in iter(proc.stdout.readline, b""):
-            self.q.put(("line", raw.decode("utf-8", errors="replace")))
-        proc.wait()
+    def _reader(self, proc, path):
+        """A naplófájl követése (tail) a folyamat végéig; teljes sorokat ad tovább."""
+        buf = b""
+        with open(path, "rb") as fh:
+            while True:
+                chunk = fh.read()
+                if chunk:
+                    buf += chunk
+                    *lines, buf = buf.split(b"\n")
+                    for raw in lines:
+                        self.q.put(("line", raw.rstrip(b"\r").decode("utf-8", errors="replace") + "\n"))
+                elif proc.poll() is not None:
+                    rest = fh.read()
+                    buf += rest
+                    if not rest:
+                        break
+                else:
+                    time.sleep(0.2)
+        if buf:
+            self.q.put(("line", buf.decode("utf-8", errors="replace") + "\n"))
         self.q.put(("done", proc.returncode))
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     def _stop(self):
         if self.proc and self.proc.poll() is None:

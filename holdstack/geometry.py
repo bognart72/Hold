@@ -124,7 +124,8 @@ def dilate(mask, r):
     return cv2.dilate(mask.astype(np.uint8), k).astype(bool)
 
 
-def align_one(ref_small, ref_mask, ref_kp, ref_desc, small, mask, sun=False):
+def align_one(ref_small, ref_mask, ref_kp, ref_desc, small, mask, sun=False, spots_ref=None, spots_frm=None,
+              ds=4):
     """Egy képkocka illesztése a referenciához: AKAZE+RANSAC durva becslés, majd ECC.
 
     Hold: ECC homográfia a korong belsején (sok struktúra).
@@ -136,7 +137,7 @@ def align_one(ref_small, ref_mask, ref_kp, ref_desc, small, mask, sun=False):
     s = small.astype(np.float32)
     m = dilate(mask, 6) if sun else erode(mask, 4)
     if sun:
-        return _align_sun(ref_small, ref_mask, s, mask, m)
+        return _align_sun(ref_small, ref_mask, s, mask, m, spots_ref, spots_frm, ds)
     H0, method = None, "akaze"
     akaze = cv2.AKAZE_create(threshold=0.0005)
     kp, desc = akaze.detectAndCompute(_u8(s), m.astype(np.uint8) * 255)
@@ -193,7 +194,69 @@ def align_one(ref_small, ref_mask, ref_kp, ref_desc, small, mask, sun=False):
         return H0, float("nan"), method + "+ecc_failed"
 
 
-def _align_sun(ref_small, ref_mask, s, mask, m):
+def find_spots(gray, inner, min_area=3, max_area=5000, thr=0.88):
+    """Sötét foltok (napfoltok) keresése: a lokális háttérhez képest legalább 12%-kal sötétebb,
+    kompakt területek a korong belsejében. Visszaad: lista (x, y, terület, mélység), a hely a
+    sötétséggel súlyozott középpont (szubpixel pontos)."""
+    gb = cv2.GaussianBlur(gray, (0, 0), 1.2)
+    w = inner.astype(np.float32)
+    bg = cv2.GaussianBlur(gb * w, (0, 0), 12) / np.maximum(cv2.GaussianBlur(w, (0, 0), 12), 1e-3)
+    rel = gb / np.maximum(bg, 1e-4)
+    dark = ((rel < thr) & inner).astype(np.uint8)
+    n, lab, st, _ = cv2.connectedComponentsWithStats(dark)
+    out = []
+    for j in range(1, n):
+        a = int(st[j, cv2.CC_STAT_AREA])
+        if not (min_area <= a <= max_area):
+            continue
+        x0, y0, ww, hh = st[j, 0], st[j, 1], st[j, 2], st[j, 3]
+        sub = (lab[y0:y0 + hh, x0:x0 + ww] == j)
+        wt = (1 - rel[y0:y0 + hh, x0:x0 + ww]) * sub
+        yy, xx = np.mgrid[y0:y0 + hh, x0:x0 + ww]
+        sw = wt.sum() + 1e-9
+        out.append((float((xx * wt).sum() / sw), float((yy * wt).sum() / sw), a, float(1 - rel[lab == j].min())))
+    return out
+
+
+def _align_sun_spots(H0, spots_ref, spots_frm, ds, r_small):
+    """A korongból kapott kezdő becslést (H0, kicsinyített koordinátákban) a napfoltok párosításával
+    finomítja. ≥2 egyező folt: hasonlósági transzformáció (eltolás + forgatás + méretarány, RANSAC),
+    1 folt: csak eltolás. Hamis forgatás ellen: legfeljebb 3°, a méretarány a korongétól ≤3%-kal térhet el."""
+    if not spots_ref or not spots_frm:
+        return None, None
+    c = (ds - 1) / 2.0
+    R = np.array([[(x - c) / ds, (y - c) / ds] for x, y, a, d in spots_ref], np.float64)
+    F = np.array([[(x - c) / ds, (y - c) / ds] for x, y, a, d in spots_frm], np.float64)
+    ar = np.array([a for *_, a, d in spots_ref], np.float64)
+    af = np.array([a for *_, a, d in spots_frm], np.float64)
+    pred = (H0[:2, :2] @ R.T).T + H0[:2, 2]
+    tol = 0.15 * r_small   # a korong-becslés és a foltok eltérése hosszú videón ~40 px is lehet
+    pr, pf = [], []
+    used = set()
+    for k in np.argsort(-ar):                 # a nagyobb foltok előbb
+        d = np.hypot(*(F - pred[k]).T)
+        j = int(np.argmin(d))
+        if d[j] < tol and j not in used and 0.33 <= af[j] / ar[k] <= 3.0:
+            used.add(j); pr.append(R[k]); pf.append(F[j])
+    if not pr:
+        return None, None
+    pr, pf = np.array(pr), np.array(pf)
+    sc0 = np.hypot(H0[0, 0], H0[1, 0])
+    if len(pr) >= 2:
+        A, inl = cv2.estimateAffinePartial2D(pr.astype(np.float32), pf.astype(np.float32), method=cv2.RANSAC,
+                                             ransacReprojThreshold=1.0)
+        if A is not None and inl is not None and inl.sum() >= 2:
+            sc = np.hypot(A[0, 0], A[1, 0]); rot = np.degrees(np.arctan2(A[1, 0], A[0, 0]))
+            if abs(rot) <= 3.0 and abs(sc / sc0 - 1) <= 0.03:
+                return np.vstack([A, [0, 0, 1]]).astype(np.float64), f"sun_spots_sim{int(inl.sum())}"
+    # egy (vagy nem konzisztens több) folt: csak eltolás-korrekció a legnagyobb egyező folt szerint
+    Hc = H0.copy()
+    dlt = pf[0] - ((H0[:2, :2] @ pr[0]) + H0[:2, 2])
+    Hc[0, 2] += dlt[0]; Hc[1, 2] += dlt[1]
+    return Hc, "sun_spots_t"
+
+
+def _align_sun(ref_small, ref_mask, s, mask, m, spots_ref=None, spots_frm=None, ds=4):
     """Nap: globális illesztés FORGATÁS NÉLKÜL.
 
     A korong kör, így önmagában nem határozza meg az elforgatást; a beégett, szinte egyenletes
@@ -206,7 +269,12 @@ def _align_sun(ref_small, ref_mask, s, mask, m):
         return np.eye(3), float("nan"), "sun_disc_failed"
     sc = df[2] / dr[2]
     H0 = np.array([[sc, 0, df[0] - sc * dr[0]], [0, sc, df[1] - sc * dr[1]], [0, 0, 1]], np.float64)
-    # a méretarányt a kör adja; az eltolást ECC finomítja a méretarány-korrigált referencián
+    # elsődleges: a napfoltokra illesztés (a foltok egyezése a lényeg; a perem és a belső rész a
+    # látómező torzítása miatt eltérően mozoghat – valódi 146 s-os videón ~20 px)
+    Hs, how = _align_sun_spots(H0, spots_ref, spots_frm, ds, dr[2])
+    if Hs is not None:
+        return Hs, float("nan"), how
+    # tartalék: a méretarányt a kör adja; az eltolást ECC finomítja a méretarány-korrigált referencián
     hh, ww = s.shape
     ref_sc = cv2.warpAffine(ref_small, H0[:2], (ww, hh), flags=cv2.INTER_LINEAR)
     try:

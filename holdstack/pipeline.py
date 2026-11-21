@@ -160,7 +160,7 @@ def run(inp, outdir, cfg: Config = Config()):
         if sun and m.any():
             m = geo.circle_mask(m)
         if not m.any():
-            return i, s.astype(np.float16), m, 0.0, 0.0
+            return i, s.astype(np.float16), m, 0.0, 0.0, None
         ys, xs = np.nonzero(m)
         hs_, ws_ = m.shape
         sy0, sy1 = max(0, ys.min() - 3), min(hs_, ys.max() + 4)
@@ -181,11 +181,14 @@ def run(inp, outdir, cfg: Config = Config()):
             band = cv2.resize(band_s.astype(np.uint8), (mfull.shape[1], mfull.shape[0]),
                               interpolation=cv2.INTER_NEAREST).astype(bool)
             q = (q, geo.limb_sharpness(g, band))
-        return i, s.astype(np.float16), m, q, sat
+            # napfoltok helye (a globális illesztés ezekre igazít), teljes képkocka-koordinátában
+            spots = [(x + x0, y + y0, a, d) for x, y, a, d in geo.find_spots(g, mfull)]
+            return i, s.astype(np.float16), m, q, sat, spots
+        return i, s.astype(np.float16), m, q, sat, None
 
-    smalls, masks, sharp, satin = {}, {}, {}, {}
-    for i, s, m, q, st in _pmap(src, None, analyse, workers, label="elemzés"):
-        smalls[i], masks[i], sharp[i], satin[i] = s, m, q, st
+    smalls, masks, sharp, satin, spots = {}, {}, {}, {}, {}
+    for i, s, m, q, st, sp in _pmap(src, None, analyse, workers, label="elemzés"):
+        smalls[i], masks[i], sharp[i], satin[i], spots[i] = s, m, q, st, sp
     n = len(sharp)
     if sun:
         # Nap: felszíni részlet × perem-élesség, mindkettő a mediánjára normálva (mértani közép)
@@ -213,7 +216,7 @@ def run(inp, outdir, cfg: Config = Config()):
         if i == ref_i:
             return i, np.eye(3), 1.0, "ref"
         h, c, m = geo.align_one(ref_small, masks[ref_i], ref_kp, ref_desc, smalls[i].astype(np.float32), masks[i],
-                                sun=sun)
+                                sun=sun, spots_ref=spots.get(ref_i), spots_frm=spots.get(i), ds=ds)
         return i, h, c, m
 
     with ThreadPoolExecutor(workers) as ex:
@@ -223,7 +226,13 @@ def run(inp, outdir, cfg: Config = Config()):
             if k % stepa == 0 or k == len(cand):
                 print(f"[{time.time() - t0:7.1f}s]   globális illesztés: {k}/{len(cand)}  PROGRESS {k}/{len(cand)}",
                       flush=True)
-    nweak = sum(1 for i in cand if not meth[i].endswith(("+ecc", "+ecc_t")) and i != ref_i)
+    nweak = sum(1 for i in cand if not (meth[i].endswith(("+ecc", "+ecc_t")) or meth[i].startswith("sun_spots"))
+                and i != ref_i)
+    if sun:
+        from collections import Counter
+        cnt = Counter("sun_spots_sim" if m_.startswith("sun_spots_sim") else m_ for m_ in meth.values())
+        _log("Nap-illesztés módja: " + ", ".join(f"{k}: {v}" for k, v in cnt.most_common())
+             + f" (napfolt a referencián: {len(spots.get(ref_i) or [])})", t0)
     _log(f"globális illesztés kész: referencia={names[ref_i]}, {len(cand)} jelölt, "
          f"ECC medián={np.nanmedian([ecc[i] for i in cand]):.4f}, gyenge illesztés: {nweak}", t0)
     Hf = {i: geo.scale_h(Hs_small[i], ds) for i in cand}
@@ -431,7 +440,15 @@ def run(inp, outdir, cfg: Config = Config()):
             tsel = [cand[j] for j in np.unique(np.round(np.linspace(0, len(cand) - 1, cfg.trial_frames)).astype(int))]
         else:
             tsel = list(cand)
-        ty0, tx0, th, tw = trialmod.pick_tile(ref0, ref_mask, cfg.trial_tile)
+        sp_xy = None
+        if sun and spots.get(ref_i):
+            # a referencia napfoltjai a kimeneti (ROI) koordinátákban
+            px_, py_ = maps[ref_i].inv_map_xy(np.array([s_[0] for s_ in spots[ref_i]]),
+                                              np.array([s_[1] for s_ in spots[ref_i]]))
+            sp_xy = [(float(x_), float(y_), s_[2]) for x_, y_, s_ in zip(px_, py_, spots[ref_i])]
+        # Napnál kisebb csempe a foltok körül (a nagy, egyenletes felszín ne nyomja el a foltok részletét)
+        ty0, tx0, th, tw = trialmod.pick_tile(ref0, ref_mask, min(cfg.trial_tile, 640) if sp_xy else cfg.trial_tile,
+                                              sp_xy)
         tiles = {}
         for i, g, w in _pmap(src, tsel, warp_gray, workers, label="kalibrációs kockák"):
             tiles[i] = w[ty0:ty0 + th, tx0:tx0 + tw].copy()
@@ -516,6 +533,40 @@ def run(inp, outdir, cfg: Config = Config()):
     cand_pos = {i: k for k, i in enumerate(cand)}
     _log(f"AP-rács: {len(aps)} pont, box={2 * cfg.half_box}px, lépés={step}px", t0)
 
+    # ---- 5c. Nap: peremillesztés --------------------------------------------------------------------
+    # A globális illesztés a napfoltokra igazít; a látómező torzítása miatt a korong pereme ehhez
+    # képest kockánként eltolódhat/átméreteződhet (valódi 146 s-os videón ~20 px) → elkent, kettős perem.
+    # Kockánként ismert a perem (körillesztés), így egy sima, sugárirányú korrekció a kocka peremét a
+    # referencia peremére húzza; a súly a középpont felé ρ^6 szerint elhalványul (a foltoknál elhanyagolható).
+    limb = None
+    if sun:
+        rp = geo.disc_params(ref_mask)
+        if rp is not None:
+            crx, cry, Rr = rp
+            limb = {}
+            for i in cand:
+                dp = geo.disc_params(masks[i])
+                if dp is None:
+                    continue
+                cfx, cfy = dp[0] * ds + (ds - 1) / 2, dp[1] * ds + (ds - 1) / 2
+                ox, oy = maps[i].inv_map_xy(np.array([cfx]), np.array([cfy]))
+                sk = float(np.sqrt(abs(np.linalg.det(maps[i].G[:2, :2]))))
+                limb[i] = (float(ox[0]), float(oy[0]), dp[2] * ds / max(sk, 1e-6))
+            dev = [np.hypot(v[0] - crx, v[1] - cry) + abs(v[2] - Rr) for v in limb.values()]
+            _log(f"Nap: peremillesztés – a perem eltérése a foltokhoz igazított kockákon: medián "
+                 f"{np.median(dev):.1f} px, max {np.max(dev):.1f} px", t0)
+
+    limb_ref = geo.disc_params(ref_mask) if limb is not None else None
+
+    def limb_shift(i, x, y):
+        crx, cry, Rr = limb_ref
+        ckx, cky, Rk = limb[i]
+        rho = np.hypot(x - crx, y - cry) / Rr
+        w = np.clip(rho, 0, 1.1) ** 6
+        dx = (ckx - crx) + (x - crx) * (Rk / Rr - 1)
+        dy = (cky - cry) + (y - cry) * (Rk / Rr - 1)
+        return dx * w, dy * w
+
     # ---- 6. stack (warp-mező) -----------------------------------------------------------------------
     def stack(sh, ok, wap, wglob, color, interp=cv2.INTER_CUBIC, label="stack"):
         need = [i for i in cand if wap[cand_pos[i]].max() > 0 or wglob[cand_pos[i]] > 0]
@@ -530,6 +581,9 @@ def run(inp, outdir, cfg: Config = Config()):
             # minden leképezés a durva rácson (eltolási mező + homográfia + torzítás [+ CA]), majd felskálázás
             xs = scg.xc + field.shift(sh[k, :, 1], ok[k])
             ys = scg.yc + field.shift(sh[k, :, 0], ok[k])
+            if limb is not None and i in limb:
+                dlx, dly = limb_shift(i, scg.xc, scg.yc)
+                xs = xs + dlx; ys = ys + dly
             mxc, myc = maps[i].map_xy(xs, ys)
             mx, my = scg.up_map(mxc, myc)
             wm = field.up(field.weight(wap[k], wglob[k]))

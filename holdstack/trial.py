@@ -22,10 +22,20 @@ from . import ap as apmod
 from .distortion import CoarseGrid
 
 
-def pick_tile(ref, mask, size):
-    """A legtöbb struktúrát tartalmazó size×size-es csempe a Hold belsejében. Visszaad: (y0, x0, h, w)."""
+def pick_tile(ref, mask, size, spots_xy=None):
+    """A kalibrációs csempe helye. Visszaad: (y0, x0, h, w).
+    Hold: a legtöbb struktúrát tartalmazó size×size-es terület a korong belsejében.
+    Nap (spots_xy megadva): a csempe a napfoltok köré kerül – a Napon a foltok a lényeg; a
+    legnagyobb gradiens ott gyakran a perem/szélsötétedés, és a kalibráció rossz területet pontozna."""
     H, W = ref.shape
     size = int(min(size, H, W))
+    if spots_xy:
+        w = np.array([a for _, _, a in spots_xy], np.float64)
+        cx = float(np.average([x for x, _, _ in spots_xy], weights=w))
+        cy = float(np.average([y for _, y, _ in spots_xy], weights=w))
+        h2 = size // 2
+        y0 = int(np.clip(cy - h2, 0, H - size)); x0 = int(np.clip(cx - h2, 0, W - size))
+        return y0, x0, size, size
     b = cv2.GaussianBlur(ref, (0, 0), 1.5)
     e = np.hypot(cv2.Sobel(b, cv2.CV_32F, 1, 0), cv2.Sobel(b, cv2.CV_32F, 0, 1))
     e = cv2.GaussianBlur(e * geo.erode(mask, 20), (0, 0), size / 5.0)

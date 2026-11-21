@@ -59,6 +59,31 @@ Eredmény: mindkét videón a nagy folt (umbra + penumbra) és a pici foltok **e
 
 A forgatás nélküli illesztés ára a szintetikus teszten kicsi: ott a Nap 0,4°-ot fordul, a részlethűség 0,878 → 0,870, a hamis foltok száma továbbra is 0. Valódi, rövid videón a stabilitás a fontosabb.
 
+#### 3. videó (146 s, 1440×1440, nem beégett) – foltalapú illesztés és peremillesztés
+
+A hosszú, jó minőségű videó újabb hibát hozott ki. **A foltok a korong középpontjához képest elmozdulnak** (~20 px a két vége között), a sugár ~2%-ot változik. Ez valószínűleg a látómező torzítása: a vándorló korong pereme és belseje nem egyformán torzul.
+
+| Változat | Foltok eltérése a referenciához (9 mintakocka) | Eredmény |
+|---|---|---|
+| Peremre igazítás (forgatás nélkül) | 5–23 px | elkent foltok |
+| **Napfoltokra igazítás** | **0–4 px** (többnyire < 1 px) | éles foltok, de **kettős perem** |
+| **+ peremillesztés** | 0–4 px | éles foltok **és** éles perem (perem-élesség 0,50 → 0,74) |
+
+- **Napfoltokra igazítás** (`find_spots`, `_align_sun_spots`):
+  - A program kockánként sötét foltokat keres (lokális háttérhez képest ≥ 12%, sötétséggel súlyozott, szubpixel pontos középpont), és a referenciakocka foltjaival párosítja.
+  - Ehhez a korongból kapott kezdő becslés kell; a tűrés a sugár 15%-a, és a területarányt is ellenőrzi.
+  - ≥ 2 folt: hasonlósági transzformáció RANSAC-cal (≤ 3° forgatás, méretarány ±3% a korongéhoz).
+  - 1 folt: csak eltolás. 0 folt: a peremre igazít, mint korábban.
+  - Az 1. (beégett) videón is javít: 4–10 px helyett ~1 px.
+  - **A teljes képen mérve:**
+    - 3. videó: éles foltok és perem.
+    - 2. videó: a foltok széle +4%, egy pici folt mélysége 0,25 → 0,44.
+    - 1. (20 s-os) videó: a régi és az új módszer a mérési szóráson (±5–10%) belül azonos. Rövid videónál a torzítási elcsúszás kicsi, a foltoknál ülő AP-k a maradékot is kijavítják.
+    - Szintetikus nap: részlethűség 0,870 → 0,898, hamis folt 0.
+    - Hold: bitre azonos.
+- **Próbakalibráció Napnál:** a csempe a referencia napfoltjai köré kerül (640 px). A legnagyobb gradiens a Napon gyakran a perem vagy a szélsötétedés átmenete lenne.
+- **Peremillesztés:** kockánként ismert a perem (körillesztés). Egy sima, sugárirányú korrekció a kocka peremét a referencia peremére húzza; súlya ρ⁶ (a peremen 1, a fél sugárnál ~1,5%), így a foltokat nem mozdítja.
+
 **Felvételi tanács:** a korong ne égjen be. Kicsit kisebb expozícióval vagy ISO-val a foltok környéke és a fáklyamezők is előjönnek, a beégett részből a program semmit nem tud visszaadni.
 
 ### Mérés szintetikus napfelvételen (ismert „igazsággal”)

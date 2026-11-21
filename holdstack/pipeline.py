@@ -57,6 +57,8 @@ class Config:
     target: str = "moon"           # "moon" (Hold) vagy "sun" (Nap, fehér fényű napszűrővel)
     dust: object = None            # szenzorhoz rögzített porszemek eltávolítása (None = Napnál be, Holdnál ki)
     sun_enhance: bool = True       # Nap: szélsötétedés-kiegyenlített, kiemelt változat is készül
+    sun_detail: bool = True        # Nap: részlet-változat (folt-dekonvolúció + fáklyamező-kiemelés, _nap_reszlet)
+    facula_gain: float = 2.5       # Nap: a fáklyamezők kiemelésének erőssége (0 = nincs; 5 fölött túl erős)
     trial: bool = False            # próbafuttatásos kalibráció (AP-box × arány) a teljes feldolgozás előtt
     trial_only: bool = False       # csak kalibráció: a javaslatot elmenti, stack nem készül
     trial_frames: int = 80         # legfeljebb ennyi képkockán fut a kalibráció
@@ -686,6 +688,17 @@ def run(inp, outdir, cfg: Config = Config()):
         save16(os.path.join(outdir, f"{base}_nap_kiemelt.tif"), enh)
         save8(os.path.join(outdir, f"{base}_nap_kiemelt.png"), enh)
         _log("Nap: szélsötétedés-kiegyenlített, kiemelt változat elkészült (_nap_kiemelt)", t0)
+    sundet = dict(enabled=False)
+    if sun and cfg.sun_detail:
+        from . import sunpost
+        det, sinfo = sunpost.enhance(lin, cm, facula_gain=cfg.facula_gain)
+        det = sun_enhance(np.clip(det, 0, 1), cm)
+        save16(os.path.join(outdir, f"{base}_nap_reszlet.tif"), det)
+        save8(os.path.join(outdir, f"{base}_nap_reszlet.png"), det)
+        sundet = dict(enabled=True, facula_gain=cfg.facula_gain, **sinfo)
+        ps = sinfo.get("psf_sigma")
+        _log("Nap: részlet-változat (umbra–penumbra dekonvolúció, fáklyamezők) elkészült (_nap_reszlet); "
+             + (f"PSF szigma a peremből {ps:.2f} px" if ps else "a PSF nem mérhető, dekonvolúció nélkül"), t0)
     if os.path.exists(os.path.join(outdir, "_pormaszk.png")):
         os.replace(os.path.join(outdir, "_pormaszk.png"), os.path.join(outdir, f"{base}_pormaszk.png"))
     _log(f"fényesség: beégett pixel a célponton — bemenet max {bright['input_saturated_max'] * 100:.3f}%, "
@@ -712,7 +725,7 @@ def run(inp, outdir, cfg: Config = Config()):
         local_shift_px=dict(median=float(np.median(shmag)) if shmag.size else None,
                             p95=float(np.percentile(shmag, 95)) if shmag.size else None),
         flat={k: v for k, v in calib.items() if k != "gains"}, distortion=dinfo, brightness=bright,
-        trial_calibration=trial_info, target=cfg.target,
+        trial_calibration=trial_info, target=cfg.target, sun_detail=sundet,
         dust={k: v for k, v in dust_info.items() if k != "speck_list"} | (
             {"specks_top": dust_info.get("speck_list", [])[:10]} if dust_info.get("enabled") else {}),
         chromatic_aberration=dict(per_frame=cainfo, residual_on_stack=ca2),

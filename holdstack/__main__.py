@@ -19,7 +19,11 @@ def main():
                    help="szenzorhoz rögzített porszemek eltávolítása (Napnál alapból be)")
     p.add_argument("--no-dust", dest="dust", action="store_false", help="porszem-eltávolítás kikapcsolása")
     p.add_argument("--no-sun-enhance", action="store_true", help="Nap: a kiemelt (_nap_kiemelt) változat elhagyása")
-    p.add_argument("--auto", action="store_true", help="paraméterek hangolása ehhez a felvételhez a futás előtt")
+    p.add_argument("--no-sun-detail", action="store_true",
+                   help="Nap: a részlet-változat (_nap_reszlet: umbra–penumbra + fáklyamezők) elhagyása")
+    p.add_argument("--facula", type=float, default=2.5,
+                   help="Nap: fáklyamező-kiemelés erőssége (alap: 2.5; 0 = nincs)")
+    p.add_argument("--auto",action="store_true", help="paraméterek hangolása ehhez a felvételhez a futás előtt")
     p.add_argument("--trial", action="store_true",
                    help="próbafuttatásos kalibráció (AP-box × arány mini-stackekkel), majd teljes futás a legjobbal")
     p.add_argument("--trial-only", action="store_true",
@@ -73,7 +77,7 @@ def main():
                  mineral=a.mineral, sharpen=tuple(float(x) for x in str(v["sharpen"]).split(",")),
                  trial=a.trial, trial_only=a.trial_only, workers=a.workers,
                  target="sun" if a.target in ("sun", "nap") else "moon", dust=a.dust,
-                 sun_enhance=not a.no_sun_enhance)
+                 sun_enhance=not a.no_sun_enhance, sun_detail=not a.no_sun_detail, facula_gain=a.facula)
     run(a.input, a.out, cfg)
 
 

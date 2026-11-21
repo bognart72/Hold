@@ -105,6 +105,7 @@ class App(tk.Tk):
         self.vars["sharpen"] = tk.StringVar(value="2.0,1.5,1.2,1.0")
         ttk.Entry(opt, textvariable=self.vars["sharpen"], width=16).grid(row=8, column=1, columnspan=2, sticky="w")
 
+        num(9, "Nap: fáklyamező-kiemelés", "facula", 2.5, 0.0, 6.0, 0.5, "0 = ki; 5 fölött túl erős")
         self.flags = {}
         for r, (key, text, default) in enumerate([
                 ("refine", "Finomító második mérés", True),
@@ -114,7 +115,7 @@ class App(tk.Tk):
                 ("gain", "Képkockánkénti fényesség-kiegyenlítés", True),
                 ("mineral", "Ásványi hold (mineral moon) kép is készüljön", False),
                 ("trial", "Próbafuttatásos kalibráció a futás elején", False),
-                ("stretch", "Automatikus széthúzás (alapból ki – beéghet)", False)], start=9):
+                ("stretch", "Automatikus széthúzás (alapból ki – beéghet)", False)], start=10):
             v = tk.BooleanVar(value=default)
             ttk.Checkbutton(opt, text=text, variable=v).grid(row=r, column=0, columnspan=3, sticky="w")
             self.flags[key] = v
@@ -167,6 +168,7 @@ class App(tk.Tk):
         # átméretezés nem vált ki újabb <Configure> eseményt (nincs végtelen méretezési ciklus).
         self.img_tabs = {}
         for key, title in [("preview", "Eredmény"), ("mineral", "Ásványi hold"), ("sun_enh", "Nap kiemelt"),
+                           ("sun_det", "Nap részlet"),
                            ("aps", "Alignment pontok"), ("torzitas", "Torzítási mező"), ("flat", "Vinyettálás"),
                            ("dust", "Pormaszk")]:
             c = tk.Canvas(self.nb, background="#1e1e1e", highlightthickness=0, width=200, height=200)
@@ -225,6 +227,7 @@ class App(tk.Tk):
         for k in ("percent", "min_frames", "candidates", "half_box", "search", "knee", "defringe", "sharpen"):
             self.vars[k].set(str(DEFAULTS[k]))
         self.vars["mineral"].set("4.0")
+        self.vars["facula"].set("2.5")
         for k in ("refine", "flat", "distortion", "ca", "gain"):
             self.flags[k].set(bool(DEFAULTS[k]))
         self.flags["mineral"].set(False)
@@ -340,6 +343,8 @@ class App(tk.Tk):
         if f["stretch"]: a.append("--stretch")
         if f.get("trial"): a.append("--trial")
         a += ["--target", self.target.get()]
+        if self.target.get() == "sun":
+            a += ["--facula", v.get("facula") or "2.5"]
         return a
 
     def _start(self):
@@ -471,7 +476,7 @@ class App(tk.Tk):
         out = self.out.get()
         base = os.path.splitext(os.path.basename(os.path.normpath(self.inp.get())))[0]
         files = dict(preview=f"{base}_preview.png", mineral=f"{base}_mineral.png",
-                     sun_enh=f"{base}_nap_kiemelt.png", dust=f"{base}_pormaszk.png", aps=f"{base}_aps.jpg",
+                     sun_enh=f"{base}_nap_kiemelt.png", sun_det=f"{base}_nap_reszlet.png",dust=f"{base}_pormaszk.png", aps=f"{base}_aps.jpg",
                      torzitas=f"{base}_torzitas.png", flat=f"{base}_flat.png")
         for k, fn in files.items():
             p = os.path.join(out, fn)
@@ -521,6 +526,12 @@ class App(tk.Tk):
             lines.append(f"Célpont: {'Nap' if r.get('target') == 'sun' else 'Hold'}; pormaszk: "
                          + (f"{du['specks']} porszem eltávolítva (legmélyebb {du['max_depth'] * 100:.0f}%)"
                             if du.get("enabled") else f"nincs ({du.get('msg', '')})"))
+        sd = r.get("sun_detail") or {}
+        if sd.get("enabled"):
+            ps = sd.get("psf_sigma")
+            lines.append("Nap részlet: " + (f"PSF szigma {ps:.2f} px, foltok dekonvolválva" if ps else
+                                            "PSF nem mérhető, dekonvolúció nélkül")
+                         + f"; fáklyamező-kiemelés {sd.get('facula_gain', 0):g}")
         ca = r.get("chromatic_aberration", {}).get("per_frame", {})
         if ca.get("enabled"):
             lines.append(f"Kromatikus aberráció: R {ca['R']['mean_shift_px']:.2f} px (max {ca['R']['max_shift_px']:.2f}), "

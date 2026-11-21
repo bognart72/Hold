@@ -82,7 +82,20 @@ for sp in truth["spots"]:
         ring = np.percentile(box, 75)
         core = img[y - int(ru) - 1:y + int(ru) + 2, x - int(ru) - 1:x + int(ru) + 2].min()
         return 1 - core / max(ring, 1e-6)
-    res_spots.append(dict(r_umbra=sp["r_umbra"], depth_stack=float(depth(gn)), depth_truth=float(depth(tw))))
+    def struct(img):
+        """penumbra szintje és a folt körüli túllövés (gyűrűzés) a környezethez képest"""
+        rp = sp["r_penumbra"] * s
+        yy_, xx_ = np.mgrid[y - w:y + w, x - w:x + w]
+        d_ = np.hypot(xx_ - x, yy_ - y)
+        box = img[y - w:y + w, x - w:x + w]
+        ring_bg = np.median(box[(d_ > rp + 6) & (d_ < rp + 14)]) if ((d_ > rp + 6) & (d_ < rp + 14)).any() else 1
+        pen = box[(d_ > ru + 1.5) & (d_ < rp - 1.0)]
+        over = box[(d_ > rp + 0.5) & (d_ < rp + 5)]
+        return (float(np.median(pen) / ring_bg) if pen.size else float("nan"),
+                float(over.max() / ring_bg - 1) if over.size else float("nan"))
+    ps, os_ = struct(gn); pt, ot = struct(tw)
+    res_spots.append(dict(r_umbra=sp["r_umbra"], depth_stack=float(depth(gn)), depth_truth=float(depth(tw)),
+                          pen_stack=ps, pen_truth=pt, over_stack=os_, over_truth=ot))
 
 # hamis foltok: sötét pöttyök az eredményben, amelyek az igazságban nincsenek
 bg = cv2.GaussianBlur(gn, (0, 0), 8)
@@ -109,7 +122,12 @@ out = dict(detail_corr=corr, spots=res_spots, spot_depth_ratio_median=float(np.m
            false_spot_list=false_spots[:20])
 print(json.dumps({k: v for k, v in out.items() if k not in ("spots", "false_spot_list")}, ensure_ascii=False))
 for r in res_spots:
-    print(f"  folt umbra {r['r_umbra']:>4} px: mélység eredmény {r['depth_stack']:.3f} / igazság {r['depth_truth']:.3f}")
+    print(f"  folt umbra {r['r_umbra']:>4} px: mélység {r['depth_stack']:.3f}/{r['depth_truth']:.3f}  "
+          f"penumbra {r['pen_stack']:.3f}/{r['pen_truth']:.3f}  túllövés {r['over_stack']:+.3f}/{r['over_truth']:+.3f}")
+pen_err = [abs(r["pen_stack"] - r["pen_truth"]) for r in res_spots if np.isfinite(r["pen_stack"])]
+print(f"ÖSSZEGZÉS: mélység-arány medián {out['spot_depth_ratio_median']:.3f}, min {out['spot_depth_ratio_min']:.3f}; "
+      f"penumbra-hiba medián {np.median(pen_err):.3f}; túllövés max {max(r['over_stack'] for r in res_spots):+.3f} "
+      f"(igazság {max(r['over_truth'] for r in res_spots):+.3f})")
 for f in false_spots[:10]:
     print(f"  HAMIS folt: ({f['x']:.0f},{f['y']:.0f}) terület {f['area']} px, mélység {f['depth']:.3f}")
 if a.out:

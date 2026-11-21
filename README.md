@@ -84,6 +84,30 @@ A hosszú, jó minőségű videó újabb hibát hozott ki. **A foltok a korong k
 - **Próbakalibráció Napnál:** a csempe a referencia napfoltjai köré kerül (640 px). A legnagyobb gradiens a Napon gyakran a perem vagy a szélsötétedés átmenete lenne.
 - **Peremillesztés:** kockánként ismert a perem (körillesztés). Egy sima, sugárirányú korrekció a kocka peremét a referencia peremére húzza; súlya ρ⁶ (a peremen 1, a fél sugárnál ~1,5%), így a foltokat nem mozdítja.
 
+### Napfoltok umbra–penumbra szerkezete és fáklyamezők (`_nap_reszlet.png`)
+
+Napnál a program egy harmadik kimenetet is készít (`holdstack/sunpost.py`). A színarányt nem változtatja, csak a fényességet.
+
+1. **PSF a peremből.** A napkorong pereme valójában éles lépcső. A stacken látszó elmosódottsága a teljes (légköri + optikai + stack) elmosódás. A sugárirányú peremprofil deriváltjából 720 irányban mért szélesség mediánja adja a Gauss-PSF szigmáját. A 3. videón ez 1,6 px.
+2. **Richardson–Lucy dekonvolúció csak a foltoknál.** 30 iteráció, csillapítással (arány 1/1,6…1,6), a PSF 90%-ával (kevesebb túllövés). Csak a foltok és közvetlen környezetük kapja meg, puha átmenettel; a perem előtt kikapcsol. A foltokat ugyanaz a szabály jelöli ki, mint az illesztésnél: kompakt, a helyi háttérnél legalább 10%-kal sötétebb területek.
+3. **Fáklyamezők.** A szélsötétedés kiegyenlítése után a 2–25 px léptékű **pozitív** eltérés erősödik (`--facula`, alap 2,5). A súly a perem felé nő, mert ott látszanak a fáklyamezők. A legszélső 1,5%-os sávban és a foltokon nincs kiemelés, a szűrés a korongon belül normált, így a peremen nem keletkezik hamis világos gyűrű.
+
+Mérés a szintetikus napon (ismert igazsággal):
+
+| Változat | Részlethűség | Foltmélység-arány (medián / min) | Penumbra-szint hibája | Túllövés a folt körül (igazság +3,0%) |
+|---|---|---|---|---|
+| Utófeldolgozás nélkül | 0,898 | 0,966 / 0,767 | 0,011 | – |
+| Dekonvolúció az egész korongon | 0,789 | – | – | – |
+| **Dekonvolúció csak a foltoknál** | 0,877 | **1,005 / 0,927** | **0,004** | +4,2% |
+| ugyanez 50 iterációval | 0,877 | 1,002 / 0,935 | 0,003 | +5,1% |
+
+- A teljes korong dekonvolúciója a sima felszínen főleg zajt erősít (részlethűség 0,90 → 0,79), ezért csak a foltoknál fut.
+- A foltoknál a legkisebb foltok is visszakapják a mélységük nagy részét (min. 0,77 → 0,93), az umbra–penumbra határ élesebb, a penumbra szintje közelebb van a valódihoz.
+- Külön foltkontraszt-erősítés (`spot_gain`) 1,5-tel 26%-kal túlsötétítette a foltokat, ezért alapból ki van kapcsolva.
+- Valódi 3. videón a fáklyamező-erősítés 2,5-tel jól előhozza a perem menti fáklyamezőket; 5,0-nál már túl erős, mesterkélt.
+
+Kikapcsolás: `--no-sun-detail`. A felületen: **Nap: fáklyamező-kiemelés** mező, és **Nap részlet** fül.
+
 **Felvételi tanács:** a korong ne égjen be. Kicsit kisebb expozícióval vagy ISO-val a foltok környéke és a fáklyamezők is előjönnek, a beégett részből a program semmit nem tud visszaadni.
 
 ### Mérés szintetikus napfelvételen (ismert „igazsággal”)
@@ -336,6 +360,7 @@ Opcionális külön kép: `*_mineral.tif` és `*_mineral.png`.
 - `*_stack_sharpened.tif`, `*_preview.png`: alap wavelet-élesítéssel.
 - `*_aps.jpg`: az alignment pointok a referencián. Zöld = megbízható, piros = gyakran sikertelen.
 - `*_flat.png`: a becsült vinyettálás.
+- Napnál: `*_nap_kiemelt.png/.tif` (szélsötétedés-kiegyenlített), `*_nap_reszlet.png/.tif` (umbra–penumbra dekonvolúció + fáklyamezők), `*_pormaszk.png`.
 - `*_report.json`: minden paraméter, képkockánkénti élesség, illesztés, erősítés és súly.
 
 ## Algoritmus röviden

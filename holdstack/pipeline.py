@@ -143,6 +143,9 @@ def run(inp, outdir, cfg: Config = Config()):
     _log(f"bemenet: {src.kind}, {src.n} kocka, {W}x{H}", t0)
     sun = cfg.target == "sun"
     use_dust = cfg.dust if cfg.dust is not None else sun
+    # Nap: az AP-k csak teljesen a korong belsejében (a perem mentén csak a peremre merőleges
+    # eltolás mérhető megbízhatóan – apertúra-probléma –, a fényudvar pedig kockánként változik)
+    ap_erode, ap_cover = (12, 0.999) if sun else (4, 0.7)
     if sun and cfg.mineral > 0:
         _log("Nap-mód: az ásványi hold (mineral) színkiemelés itt nem értelmezett, kihagyva", t0)
         cfg.mineral = 0.0
@@ -153,7 +156,9 @@ def run(inp, outdir, cfg: Config = Config()):
         scale = 1.0 / (65535.0 if raw.dtype == np.uint16 else 255.0)
         g8 = cv2.cvtColor(raw, cv2.COLOR_BGR2GRAY) if raw.ndim == 3 else raw
         s = cv2.resize(g8, (W // ds, H // ds), interpolation=cv2.INTER_AREA).astype(np.float32) * scale
-        m = geo.moon_mask(s)
+        m = geo.moon_mask(s, 0.4 if sun else 0.25)
+        if sun and m.any():
+            m = geo.circle_mask(m)
         if not m.any():
             return i, s.astype(np.float16), m, 0.0, 0.0
         ys, xs = np.nonzero(m)
@@ -218,7 +223,7 @@ def run(inp, outdir, cfg: Config = Config()):
             if k % stepa == 0 or k == len(cand):
                 print(f"[{time.time() - t0:7.1f}s]   globális illesztés: {k}/{len(cand)}  PROGRESS {k}/{len(cand)}",
                       flush=True)
-    nweak = sum(1 for i in cand if not meth[i].endswith("+ecc") and i != ref_i)
+    nweak = sum(1 for i in cand if not meth[i].endswith(("+ecc", "+ecc_t")) and i != ref_i)
     _log(f"globális illesztés kész: referencia={names[ref_i]}, {len(cand)} jelölt, "
          f"ECC medián={np.nanmedian([ecc[i] for i in cand]):.4f}, gyenge illesztés: {nweak}", t0)
     Hf = {i: geo.scale_h(Hs_small[i], ds) for i in cand}
@@ -307,7 +312,8 @@ def run(inp, outdir, cfg: Config = Config()):
         ref = (acc / np.maximum(cnt, 1)).astype(np.float32)
         rm = maps[ref_i].warp(ref_mask_d, OW, OH, cv["cg"], cv2.INTER_NEAREST, 0.0) > 0.5
         rm &= cnt >= max(1, nref // 2)
-        aps, struct, step = apmod.make_grid(ref, geo.erode(rm, 4), cfg.half_box, cfg.step, struct_rel=cfg.struct_rel)
+        aps, struct, step = apmod.make_grid(ref, geo.erode(rm, ap_erode), cfg.half_box, cfg.step, min_cover=ap_cover,
+                                            struct_rel=cfg.struct_rel)
         return ref, rm, aps, step
 
     def full_mask(m):
@@ -445,7 +451,7 @@ def run(inp, outdir, cfg: Config = Config()):
              f"AP-box {[2 * h for h in hbs]} px × legjobb {pcts} %", t0)
         targs = (ref0[ty0:ty0 + th, tx0:tx0 + tw], ref_mask[ty0:ty0 + th, tx0:tx0 + tw], tgs)
         best, trials = trialmod.run_trials(tl, *targs, hbs, pcts, cfg.search, tmin, cfg.struct_rel, cfg.min_corr,
-                                           log=lambda s: _log(s, t0))
+                                           log=lambda s: _log(s, t0), ap_erode=ap_erode, ap_cover=ap_cover)
         # ha a győztes a jelöltlista szélén van, abba az irányba tovább próbálunk (legfeljebb 2 kör)
         min_pct = 100.0 * tmin / max(len(tl), 1)
         for _round in range(2):
@@ -472,7 +478,8 @@ def run(inp, outdir, cfg: Config = Config()):
                  f"{', '.join(f'box {2 * h} px / {p:g}%' for h, p in combos)}", t0)
             for h, p in combos:
                 b2, r2 = trialmod.run_trials(tl, *targs, [h], [p], cfg.search, tmin, cfg.struct_rel,
-                                             cfg.min_corr, log=lambda s: _log(s, t0))
+                                             cfg.min_corr, log=lambda s: _log(s, t0),
+                                             ap_erode=ap_erode, ap_cover=ap_cover)
                 trials += r2
             best = max(trials, key=lambda r: r["score"])
         if best is not None:
@@ -496,7 +503,7 @@ def run(inp, outdir, cfg: Config = Config()):
                 return dict(trial=trial_info, seconds=time.time() - t0)
             if best["half_box"] != cfg.half_box:
                 cfg.half_box = best["half_box"]
-                aps, _s, step = apmod.make_grid(ref0, geo.erode(ref_mask, 4), cfg.half_box, cfg.step,
+                aps, _s, step = apmod.make_grid(ref0, geo.erode(ref_mask, ap_erode), cfg.half_box, cfg.step, min_cover=ap_cover,
                                                 struct_rel=cfg.struct_rel)
             cfg.stack_percent = best["percent"]
         else:
@@ -554,6 +561,21 @@ def run(inp, outdir, cfg: Config = Config()):
 
     sh, ok, q, raw_ok = measure_smooth(ref0)
     _log(f"AP-mérés: sikeres {raw_ok.mean() * 100:.1f}%, simítás után megbízható {ok.mean() * 100:.1f}%", t0)
+    # Megbízhatatlan AP-k elhagyása: amely AP a kockák negyedében sem mér megbízhatóan (pl. a beégett,
+    # egyenletes napkorongon), az csak zajt adna a helyi mezőhöz és a súlyokhoz. A helyén a globális
+    # (egész kockás) élességi rangsor dönt. (Holdon az AP-k ~98%-a megbízható, ott ez nem változtat.)
+    rel = ok.mean(0)
+    keep = rel >= 0.25
+    if keep.sum() < 3:
+        keep = np.zeros_like(keep); keep[np.argsort(-rel)[:3]] = True
+    if keep.sum() < len(aps):
+        n_before = len(aps)
+        aps = aps[keep]; sh = sh[:, keep]; ok = ok[:, keep]; q = q[:, keep]; raw_ok = raw_ok[:, keep]
+        nb = apmod.Neighbors(aps, step)
+        field = apmod.Field(aps, (OH, OW), step)
+        scg = distmod.CoarseGrid(OW, OH, field.f)
+        _log(f"megbízhatatlan AP-k elhagyva: {n_before - len(aps)} db; marad {len(aps)} "
+             f"(megbízható {ok.mean() * 100:.1f}%)", t0)
 
     gscore = np.array([sharp[i] for i in cand])
     if cfg.refine:

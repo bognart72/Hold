@@ -36,23 +36,38 @@ def pick_tile(ref, mask, size):
     return y0, x0, size, size
 
 
-def score(img, mask):
-    m = float(img[mask].mean()) if mask.any() else float(img.mean())
+def score(img, mask, sat_level=None):
+    """Pontszám = középfrekvenciás részlet / √zaj.
+    A beégett (telített) pixelek kimaradnak: ott nincs se részlet, se zaj, és torzítanák a mérést.
+    A zajnak alsó korlátja van (8 bites kvantálás szintje), különben egy beégett, zajmentes
+    csempén a pontszám „elszállna” (valódi napfelvételen +361% hamis javulást mutatott)."""
+    if sat_level is not None:
+        dil = cv2.dilate((img >= sat_level).astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
+        mask = mask & ~dil
+    if mask.sum() < 1000:
+        return 0.0, 0.0, 0.0
+    m = float(img[mask].mean())
     dog = cv2.GaussianBlur(img, (0, 0), 1.0) - cv2.GaussianBlur(img, (0, 0), 3.0)
     S = float(dog[mask].var()) / (m * m + 1e-12)
     hf = img - cv2.GaussianBlur(img, (0, 0), 0.7)
     N = float(1.4826 * np.median(np.abs(hf[mask]))) / (m + 1e-12)
-    return S / np.sqrt(max(N, 1e-6)), S, N
+    # alsó korlát csak a „közel nulla” zaj ellen (a beégett pixelek már ki vannak zárva); a valódi
+    # zajnál jóval kisebb, hogy a Holdon ne torzítsa a választást (1/255 túl nagy volt: rossz boxot választott)
+    N = max(N, (0.1 / 255.0) / max(m, 1e-3))
+    return S / np.sqrt(N), S, N
 
 
 def run_trials(tiles, ref_tile, mask_tile, gscore, half_boxes, percents, search, min_frames,
-               struct_rel=0.05, min_corr=0.5, log=print):
+               struct_rel=0.05, min_corr=0.5, log=print, ap_erode=4, ap_cover=0.7):
     """tiles: lista (F) globálisan illesztett szürke csempe (-1 = érvénytelen); gscore: (F) globális élesség."""
     t0 = time.time()
     F = len(tiles)
     Hh, Ww = ref_tile.shape
     refb = cv2.GaussianBlur(ref_tile, (0, 0), 1.0)
     smask = geo.erode(mask_tile, 40)
+    # beégés-küszöb csak akkor, ha a csempe ténylegesen közel van a telítéshez (Holdnál nincs hatása)
+    rmax = float(ref_tile.max())
+    sat_level = 0.985 * rmax if rmax >= 0.9 else None
     blurred = [cv2.GaussianBlur(np.where(t >= 0, t, 0).astype(np.float32), (0, 0), 1.0) for t in tiles]
     valids = [t >= 0 for t in tiles]
     results = []
@@ -60,7 +75,8 @@ def run_trials(tiles, ref_tile, mask_tile, gscore, half_boxes, percents, search,
     done = 0
     for hb in half_boxes:
         try:
-            aps, _, step = apmod.make_grid(ref_tile, geo.erode(mask_tile, 4), hb, 0, struct_rel=struct_rel)
+            aps, _, step = apmod.make_grid(ref_tile, geo.erode(mask_tile, ap_erode), hb, 0, min_cover=ap_cover,
+                                           struct_rel=struct_rel)
         except RuntimeError:
             continue
         if len(aps) < 6:
@@ -74,6 +90,12 @@ def run_trials(tiles, ref_tile, mask_tile, gscore, half_boxes, percents, search,
             q[k] = apmod.local_quality_at(np.where(valids[k], tiles[k], 0).astype(np.float32), pts, hb)
         raw_ok = float(ok.mean())
         sh, ok = apmod.smooth(sh, ok, apmod.Neighbors(aps, step))
+        # ugyanaz a szabály, mint a teljes futásban: a kockák negyedében sem megbízható AP kimarad
+        rel = ok.mean(0)
+        keep = rel >= 0.25
+        if keep.sum() < 3:
+            keep = np.zeros_like(keep); keep[np.argsort(-rel)[:3]] = True
+        aps, sh, ok, q = aps[keep], sh[:, keep], ok[:, keep], q[:, keep]
         field = apmod.Field(aps, (Hh, Ww), step)
         cg = CoarseGrid(Ww, Hh, field.f)
         for pct in percents:
@@ -91,7 +113,7 @@ def run_trials(tiles, ref_tile, mask_tile, gscore, half_boxes, percents, search,
                 wm = field.up(field.weight(wsel[k], wg[k])) * vv
                 num += wm * out; den += wm
             st = num / np.maximum(den, 1e-6)
-            sc, S, N = score(st, smask & (den > 1e-3))
+            sc, S, N = score(st, smask & (den > 1e-3), sat_level)
             done += 1
             results.append(dict(half_box=int(hb), percent=float(pct), score=float(sc), detail=float(S),
                                 noise=float(N), aps=int(len(aps)), ap_success=raw_ok))

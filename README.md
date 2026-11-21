@@ -44,6 +44,23 @@ A Nap képe a Holdtól lényegesen eltér, ezért a Nap-mód ezeket másképp cs
 
 Pormaszk Holdnál is kérhető: `--dust`. Kikapcsolás: `--no-dust`.
 
+### Tapasztalatok valódi napvideón (2026-11-21, 2 db 4K telefonvideó, 603 és 766 kocka)
+
+A valódi felvételek olyan hibákat hoztak ki, amelyek a szintetikus tesztben nem jöttek elő:
+
+| Probléma a valódi felvételen | Következmény | Javítás |
+|---|---|---|
+| Túlexponált korong (~13%-a beégett) és erős **fényudvar** körülötte | A Hold-küszöbbel a maszk az udvart és egy tükröződést is a koronghoz vette. Az AP-k az udvarba kerültek, a pormaszk 80 hamis „porszemet” talált a perem mentén. | Nap-küszöb a tartomány 40%-án (a peremugrás közepén) és **robusztus körillesztés** a maszkra: a perem pontos, az udvar és a tükröződés kimarad. A pormaszk után 2 valódi hiba maradt (≤4%). |
+| A korong **kör**, a felszín beégett: az elforgatást semmi sem rögzíti | Az affin ECC 0…16° hamis forgatást adott kockánként, **a foltok megkettőződtek**. | Nap-módban a globális illesztés **forgatás nélküli**: méretarány és középpont a körből, finomítás csak eltolással. 20–30 s alatt a valódi mezőrotáció < 0,2°, ezt a helyi AP-k veszik át. |
+| A perem mentén az AP csak merőlegesen mér (apertúra-probléma), a beégett felszínen nincs fogás | Az AP-k csak 3–6%-a volt megbízható, a súlyozás bizonytalanná vált. | AP-k csak a korong belsejében. A mérés után a kockák negyedében sem megbízható AP-k **kimaradnak**, helyettük a globális élességi rangsor dönt. A foltoknál maradt AP-k 66–93%-ban megbízhatók. |
+| A próbakalibráció pontszáma a beégett, zajmentes csempén „elszállt” (+361%) | Félrevezető választás | A pontozásból a beégett pixelek kimaradnak, a zajnak alsó korlátja van. |
+
+Eredmény: mindkét videón a nagy folt (umbra + penumbra) és a pici foltok **egyszer, élesen** jelennek meg.
+
+A forgatás nélküli illesztés ára a szintetikus teszten kicsi: ott a Nap 0,4°-ot fordul, a részlethűség 0,878 → 0,870, a hamis foltok száma továbbra is 0. Valódi, rövid videón a stabilitás a fontosabb.
+
+**Felvételi tanács:** a korong ne égjen be. Kicsit kisebb expozícióval vagy ISO-val a foltok környéke és a fáklyamezők is előjönnek, a beégett részből a program semmit nem tud visszaadni.
+
 ### Mérés szintetikus napfelvételen (ismert „igazsággal”)
 
 `tools/make_sun_test.py` készít tesztfelvételt. Tartalma:

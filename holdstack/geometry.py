@@ -7,12 +7,16 @@ import numpy as np
 import cv2
 
 
-def moon_mask(small):
-    """Hold-maszk kicsinyített szürke képen. A sötét égi háttér és az okulár-blende kimarad."""
+def moon_mask(small, level=0.25):
+    """Célpont-maszk kicsinyített szürke képen. A sötét égi háttér és az okulár-blende kimarad.
+    level: a küszöb helye a háttér (2. percentilis) és a csúcsfény (99.7.) között.
+    Hold: 0.25 (a terminátor menti sötétebb részek is bent maradjanak).
+    Nap: 0.4 — a túlexponált korong körüli fényudvar (szórt fény) a Hold-küszöb fölé érhet,
+    a korong pereme viszont éles ugrás, ennek közepére esik a 0.4-es küszöb."""
     b = cv2.GaussianBlur(small.astype(np.float32), (0, 0), 2)
     hi = np.percentile(b, 99.7)
     lo = np.percentile(b, 2)
-    m = (b > lo + 0.25 * (hi - lo)).astype(np.uint8)
+    m = (b > lo + level * (hi - lo)).astype(np.uint8)
     n, lab, st, _ = cv2.connectedComponentsWithStats(m)
     if n < 2:
         return np.zeros_like(m, bool)
@@ -27,6 +31,42 @@ def moon_mask(small):
         if x > 0 and y > 0 and x + w < W and y + h < H:
             m[lab2 == j] = 1
     return m.astype(bool)
+
+
+def circle_mask(mask, iters=300, tol=1.5, seed=0):
+    """A maszk peremére robusztus (RANSAC + legkisebb négyzetes) körillesztés, és a kör belseje
+    mint új maszk. A Nap korongja kör: így a fényudvar dudorai, a tükröződések és a perem
+    zajos kontúrja nem kerülnek a maszkba. Ha az illesztés nem megbízható, az eredeti maszk marad."""
+    cnts, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not cnts:
+        return mask
+    P = max(cnts, key=len)[:, 0, :].astype(np.float64)
+    H, W = mask.shape
+    # a képkocka szélén levő kontúrpontok nem a perem részei (a korong kilóghat)
+    P = P[(P[:, 0] > 1) & (P[:, 0] < W - 2) & (P[:, 1] > 1) & (P[:, 1] < H - 2)]
+    if len(P) < 30:
+        return mask
+    rng = np.random.default_rng(seed)
+
+    def fit(pts):
+        A = np.c_[2 * pts, np.ones(len(pts))]
+        b = (pts ** 2).sum(1)
+        c, *_ = np.linalg.lstsq(A, b, rcond=None)
+        r = np.sqrt(max(c[2] + c[0] ** 2 + c[1] ** 2, 0))
+        return c[0], c[1], r
+
+    best, best_in = None, None
+    for _ in range(iters):
+        cx, cy, r = fit(P[rng.choice(len(P), 3, replace=False)])
+        d = np.abs(np.hypot(P[:, 0] - cx, P[:, 1] - cy) - r)
+        inl = d < tol
+        if best_in is None or inl.sum() > best_in.sum():
+            best, best_in = (cx, cy, r), inl
+    if best_in.sum() < 0.5 * len(P):
+        return mask
+    cx, cy, r = fit(P[best_in])
+    yy, xx = np.mgrid[0:H, 0:W]
+    return np.hypot(xx - cx, yy - cy) <= r - 0.5
 
 
 def erode(mask, r):
@@ -95,6 +135,8 @@ def align_one(ref_small, ref_mask, ref_kp, ref_desc, small, mask, sun=False):
     Visszaad: (H ref->frame kicsinyített koordinátákban, ecc korreláció, módszer)."""
     s = small.astype(np.float32)
     m = dilate(mask, 6) if sun else erode(mask, 4)
+    if sun:
+        return _align_sun(ref_small, ref_mask, s, mask, m)
     H0, method = None, "akaze"
     akaze = cv2.AKAZE_create(threshold=0.0005)
     kp, desc = akaze.detectAndCompute(_u8(s), m.astype(np.uint8) * 255)
@@ -149,6 +191,35 @@ def align_one(ref_small, ref_mask, ref_kp, ref_desc, small, mask, sun=False):
         return Hw, float(cc), method + "+ecc"
     except cv2.error:
         return H0, float("nan"), method + "+ecc_failed"
+
+
+def _align_sun(ref_small, ref_mask, s, mask, m):
+    """Nap: globális illesztés FORGATÁS NÉLKÜL.
+
+    A korong kör, így önmagában nem határozza meg az elforgatást; a beégett, szinte egyenletes
+    felszínen a néhány pici folt kevés ehhez. Szabad forgatással az ECC „elcsúszik” (valódi
+    felvételen 0…16° hamis forgatás → a foltok megkettőződtek). A valódi mezőrotáció 20–30 s alatt
+    < 0,2° (a peremen 1–2 px), ezt a helyi AP-mérés korrigálja. Ezért: méretarány és középpont a
+    korongra illesztett körből, majd ECC csak eltolással (a perem sávja pontosan rögzíti)."""
+    dr, df = disc_params(ref_mask), disc_params(mask)
+    if not (dr and df):
+        return np.eye(3), float("nan"), "sun_disc_failed"
+    sc = df[2] / dr[2]
+    H0 = np.array([[sc, 0, df[0] - sc * dr[0]], [0, sc, df[1] - sc * dr[1]], [0, 0, 1]], np.float64)
+    # a méretarányt a kör adja; az eltolást ECC finomítja a méretarány-korrigált referencián
+    hh, ww = s.shape
+    ref_sc = cv2.warpAffine(ref_small, H0[:2], (ww, hh), flags=cv2.INTER_LINEAR)
+    try:
+        crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
+        cc, T = cv2.findTransformECC(ref_sc, s, np.eye(2, 3, dtype=np.float32), cv2.MOTION_TRANSLATION,
+                                     crit, m.astype(np.uint8), 5)
+        tx, ty = float(T[0, 2]), float(T[1, 2])
+        if np.hypot(tx, ty) > 0.03 * max(hh, ww):
+            return H0, float("nan"), "sun_disc+ecc_rejected"
+        Hf = H0.copy(); Hf[0, 2] += tx; Hf[1, 2] += ty
+        return Hf, float(cc), "sun_disc+ecc_t"
+    except cv2.error:
+        return H0, float("nan"), "sun_disc"
 
 
 def reference_features(ref_small, ref_mask):

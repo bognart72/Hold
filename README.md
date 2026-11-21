@@ -22,6 +22,52 @@ Kifejezetten a telefonos felvétel hibáira készült:
 pip install -r requirements.txt
 ```
 
+## Nap-mód (fehér fényű napszűrővel készült felvételek)
+
+```powershell
+python -m holdstack <videó vagy képmappa> -o eredmeny\nap --target sun
+```
+
+A felületen: **Célpont: Nap**.
+
+> ⚠️ Napot fényképezni csak a teleszkóp **elé** szerelt, minősített (ISO 12312-2) napszűrővel szabad. Okulárszűrő, „sun filter” a fókuszban életveszélyes.
+
+A Nap képe a Holdtól lényegesen eltér, ezért a Nap-mód ezeket másképp csinálja:
+
+| Probléma | Megoldás |
+|---|---|
+| A korong szinte egyenletes, kevés a felszíni részlet | Az élességi rangsor a **perem élességéből** és a felszíni részletből (mértani közép) készül. A felszíni Laplace-mérték egyedül főleg zajt mérne. |
+| Kevés jellemzőpont az illesztéshez | Kevés jellemzőpontnál a **korong középpontja és sugara** adja a kezdő becslést. Az ECC **affin** modellel fut, a maszk a **perem sávját** is tartalmazza. |
+| **Pici fekete foltok: napfolt vagy porszem?** | **Pormaszk.** A Nap vándorol a szenzoron, a porszem a szenzorhoz rögzített. A program a képkocka és a referencia arányát a *szenzor* koordinátáiban mediánolja: a porszem kiemelkedik, a napfolt (mert mozog) kiesik. Csak a biztos, legalább 3%-os és 6 px-es foltokat korrigálja, máshol a kép érintetlen. |
+| Szélsötétedés (limb darkening) | `_nap_kiemelt.png`: a sugárirányú profil kiegyenlítése és enyhe helyi kontrasztkiemelés. A perem menti fáklyamezők is láthatók lesznek. A mérésre a `_stack.tif` való. |
+| Ásványi hold | Napnál nem értelmezett, kimarad. |
+
+Pormaszk Holdnál is kérhető: `--dust`. Kikapcsolás: `--no-dust`.
+
+### Mérés szintetikus napfelvételen (ismert „igazsággal”)
+
+`tools/make_sun_test.py` készít tesztfelvételt. Tartalma:
+- szélsötétedés, granuláció
+- 9 napfolt (umbra 2,5–14 px), fáklyamezők
+- **6 szenzorhoz kötött porszem**
+- drift, mezőrotáció, szenzorhoz kötött torzítás és vinyettálás
+- seeing, változó elmosódás, zaj, narancs szűrőszín, JPEG
+
+`tools/eval_sun.py` ezt méri: részlethűség, foltmélység, hamis foltok.
+
+Nehéz eset (gyenge granuláció 0,6%, kis drift ~85 px, 40 kocka):
+
+| | Hold-mód | **Nap-mód** |
+|---|---|---|
+| Hamis foltok (porszem nyoma) | 10 db (6–24% mély) | **0** |
+| Részlethűség (DoG-korreláció az igazsággal) | 0,59 | **0,88** |
+| Napfoltok mélysége, medián | 96,8% | 96,1% |
+| Megtalált porszemek | – | **6/6** (hely ±1 px, mélység 25–39%; valódi: 27–43%) |
+
+A legkisebb (2,5 px-es umbrájú) foltok mélységének ~20%-a mindkét módban elvész. Ez a felvételek elmosódásából ered, nem a stackből.
+
+Könnyebb esetben (erős granuláció, ~340 px drift) a Hold-mód is jó (részlethűség 0,95, hamis folt 0), mert a nagy drift magától kiátlagolja a port.
+
 ## Grafikus felület
 
 Dupla kattintás a `holdstack_gui.pyw` fájlon, vagy:

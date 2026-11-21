@@ -31,7 +31,7 @@ TIME_RE = re.compile(r"^\[\s*([\d.]+)s\]\s*(.*)$")
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("holdstack – Hold-stackelő")
+        self.title("holdstack – Hold- és Nap-stackelő")
         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
         w, h = min(1280, sw - 40), min(860, sh - 90)
         self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2 - 20)}")
@@ -66,6 +66,12 @@ class App(tk.Tk):
         ttk.Radiobutton(box, text="Videófájl", variable=self.kind, value="video").grid(row=0, column=0, sticky="w")
         ttk.Radiobutton(box, text="Képmappa (különálló fotók)", variable=self.kind, value="images").grid(
             row=0, column=1, columnspan=2, sticky="w")
+        self.target = tk.StringVar(value="moon")
+        tgt = ttk.Frame(box)
+        tgt.grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Label(tgt, text="Célpont:").pack(side=tk.LEFT)
+        ttk.Radiobutton(tgt, text="Hold", variable=self.target, value="moon").pack(side=tk.LEFT, padx=6)
+        ttk.Radiobutton(tgt, text="Nap (fehér fényű napszűrő)", variable=self.target, value="sun").pack(side=tk.LEFT)
         self.inp = tk.StringVar()
         ttk.Entry(box, textvariable=self.inp, width=48).grid(row=1, column=0, columnspan=2, sticky="we", pady=4)
         ttk.Button(box, text="Tallózás…", command=self._browse_in).grid(row=1, column=2, padx=(4, 0))
@@ -160,8 +166,9 @@ class App(tk.Tk):
         # A képek vásznon (Canvas) jelennek meg: a vászon nem veszi fel a kép méretét, így az
         # átméretezés nem vált ki újabb <Configure> eseményt (nincs végtelen méretezési ciklus).
         self.img_tabs = {}
-        for key, title in [("preview", "Eredmény"), ("mineral", "Ásványi hold"), ("aps", "Alignment pontok"),
-                           ("torzitas", "Torzítási mező"), ("flat", "Vinyettálás")]:
+        for key, title in [("preview", "Eredmény"), ("mineral", "Ásványi hold"), ("sun_enh", "Nap kiemelt"),
+                           ("aps", "Alignment pontok"), ("torzitas", "Torzítási mező"), ("flat", "Vinyettálás"),
+                           ("dust", "Pormaszk")]:
             c = tk.Canvas(self.nb, background="#1e1e1e", highlightthickness=0, width=200, height=200)
             c.bind("<Configure>", lambda e, k=key: self._schedule_refit(k))
             self.nb.add(c, text=title)
@@ -176,6 +183,7 @@ class App(tk.Tk):
         except Exception:
             return
         self.kind.set(s.get("kind", "video"))
+        self.target.set(s.get("target", "moon"))
         self.inp.set(s.get("input", ""))
         self.out.set(s.get("output", ""))
         for k, v in s.get("vars", {}).items():
@@ -186,7 +194,7 @@ class App(tk.Tk):
                 self.flags[k].set(v)
 
     def _save_settings(self):
-        s = dict(kind=self.kind.get(), input=self.inp.get(), output=self.out.get(),
+        s = dict(kind=self.kind.get(), target=self.target.get(), input=self.inp.get(), output=self.out.get(),
                  vars={k: v.get() for k, v in self.vars.items()},
                  flags={k: v.get() for k, v in self.flags.items()})
         try:
@@ -331,6 +339,7 @@ class App(tk.Tk):
         if not f["gain"]: a.append("--no-gain")
         if f["stretch"]: a.append("--stretch")
         if f.get("trial"): a.append("--trial")
+        a += ["--target", self.target.get()]
         return a
 
     def _start(self):
@@ -461,7 +470,8 @@ class App(tk.Tk):
     def _show_results(self):
         out = self.out.get()
         base = os.path.splitext(os.path.basename(os.path.normpath(self.inp.get())))[0]
-        files = dict(preview=f"{base}_preview.png", mineral=f"{base}_mineral.png", aps=f"{base}_aps.jpg",
+        files = dict(preview=f"{base}_preview.png", mineral=f"{base}_mineral.png",
+                     sun_enh=f"{base}_nap_kiemelt.png", dust=f"{base}_pormaszk.png", aps=f"{base}_aps.jpg",
                      torzitas=f"{base}_torzitas.png", flat=f"{base}_flat.png")
         for k, fn in files.items():
             p = os.path.join(out, fn)
@@ -506,6 +516,11 @@ class App(tk.Tk):
             lines.append(f"Kalibráció: AP-box {2 * tb['half_box']} px (félszélesség {tb['half_box']}), "
                          f"legjobb {tb['percent']:g}% – pontszám +{tc['gain_percent']:.1f}% a kiindulóhoz képest "
                          f"({len(tc['trials'])} próba)")
+        du = r.get("dust") or {}
+        if r.get("target") == "sun" or du.get("enabled"):
+            lines.append(f"Célpont: {'Nap' if r.get('target') == 'sun' else 'Hold'}; pormaszk: "
+                         + (f"{du['specks']} porszem eltávolítva (legmélyebb {du['max_depth'] * 100:.0f}%)"
+                            if du.get("enabled") else f"nincs ({du.get('msg', '')})"))
         ca = r.get("chromatic_aberration", {}).get("per_frame", {})
         if ca.get("enabled"):
             lines.append(f"Kromatikus aberráció: R {ca['R']['mean_shift_px']:.2f} px (max {ca['R']['max_shift_px']:.2f}), "

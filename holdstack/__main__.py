@@ -13,6 +13,12 @@ def main():
     p = argparse.ArgumentParser(prog="holdstack", description="Hold-stackelő (lucky imaging, multi-AP, önkalibráló flat)")
     p.add_argument("input", help="videófájl vagy képeket tartalmazó mappa")
     p.add_argument("-o", "--out", default="eredmeny", help="kimeneti mappa")
+    p.add_argument("--target", default="moon", choices=["moon", "hold", "sun", "nap"],
+                   help="célpont: moon/hold (alap) vagy sun/nap (fehér fényű napszűrős felvétel)")
+    p.add_argument("--dust", dest="dust", action="store_true", default=None,
+                   help="szenzorhoz rögzített porszemek eltávolítása (Napnál alapból be)")
+    p.add_argument("--no-dust", dest="dust", action="store_false", help="porszem-eltávolítás kikapcsolása")
+    p.add_argument("--no-sun-enhance", action="store_true", help="Nap: a kiemelt (_nap_kiemelt) változat elhagyása")
     p.add_argument("--auto", action="store_true", help="paraméterek hangolása ehhez a felvételhez a futás előtt")
     p.add_argument("--trial", action="store_true",
                    help="próbafuttatásos kalibráció (AP-box × arány mini-stackekkel), majd teljes futás a legjobbal")
@@ -65,7 +71,9 @@ def main():
                  distortion=v["distortion"] and not a.no_distortion, dist_deg=a.dist_deg,
                  stretch=a.stretch, knee=float(v["knee"]), ca=not a.no_ca, defringe=float(v["defringe"]),
                  mineral=a.mineral, sharpen=tuple(float(x) for x in str(v["sharpen"]).split(",")),
-                 trial=a.trial, trial_only=a.trial_only, workers=a.workers)
+                 trial=a.trial, trial_only=a.trial_only, workers=a.workers,
+                 target="sun" if a.target in ("sun", "nap") else "moon", dust=a.dust,
+                 sun_enhance=not a.no_sun_enhance)
     run(a.input, a.out, cfg)
 
 

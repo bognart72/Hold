@@ -129,6 +129,15 @@ class FrameMap:
                 mx, my = self.dist.D_xy(mx, my)
         return mx, my
 
+    def inv_map_xy(self, x, y):
+        """Fordított irány: képkocka (szenzor) pixel -> kimeneti vászon koordináta."""
+        if self.dist is not None:
+            dx, dy = self.dist._delta(x, y)
+            x, y = x + dx, y + dy          # U: torzított -> torzítatlan
+        Gi = np.linalg.inv(self.G)
+        z = Gi[2, 0] * x + Gi[2, 1] * y + Gi[2, 2]
+        return (Gi[0, 0] * x + Gi[0, 1] * y + Gi[0, 2]) / z, (Gi[1, 0] * x + Gi[1, 1] * y + Gi[1, 2]) / z
+
     def warp(self, img, W, H, coarse=None, interp=cv2.INTER_LINEAR, border=-1.0):
         """A képkocka a kimeneti vászonra (W x H). Torzítás nélkül pontos warpPerspective;
         torzítással a leképezés a durva rácson (coarse: CoarseGrid) számolódik és felskálázódik."""

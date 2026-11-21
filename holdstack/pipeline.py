@@ -26,7 +26,7 @@ def src_is_color(src):
         return raw.ndim == 3 and raw.shape[2] >= 3 and not (
             np.array_equal(raw[..., 0], raw[..., 1]) and np.array_equal(raw[..., 1], raw[..., 2]))
     return False
-from .post import wavelet_sharpen, soft_clip, stretch, clipped_fraction, save16, save8
+from .post import wavelet_sharpen, soft_clip, stretch, clipped_fraction, save16, save8, sun_enhance
 
 
 @dataclass
@@ -54,6 +54,9 @@ class Config:
     defringe: float = 0.5          # színszegély-csillapítás erőssége az élesített képen (0 = ki)
     mineral: float = 0.0           # „mineral moon” színerősítés (0 = ki, tipikusan 3-6)
     sharpen: tuple = (2.0, 1.5, 1.2, 1.0)
+    target: str = "moon"           # "moon" (Hold) vagy "sun" (Nap, fehér fényű napszűrővel)
+    dust: object = None            # szenzorhoz rögzített porszemek eltávolítása (None = Napnál be, Holdnál ki)
+    sun_enhance: bool = True       # Nap: szélsötétedés-kiegyenlített, kiemelt változat is készül
     trial: bool = False            # próbafuttatásos kalibráció (AP-box × arány) a teljes feldolgozás előtt
     trial_only: bool = False       # csak kalibráció: a javaslatot elmenti, stack nem készül
     trial_frames: int = 80         # legfeljebb ennyi képkockán fut a kalibráció
@@ -138,6 +141,11 @@ def run(inp, outdir, cfg: Config = Config()):
     H, W = src.shape
     ds = cfg.ds
     _log(f"bemenet: {src.kind}, {src.n} kocka, {W}x{H}", t0)
+    sun = cfg.target == "sun"
+    use_dust = cfg.dust if cfg.dust is not None else sun
+    if sun and cfg.mineral > 0:
+        _log("Nap-mód: az ásványi hold (mineral) színkiemelés itt nem értelmezett, kihagyva", t0)
+        cfg.mineral = 0.0
 
     # ---- 1. elemzés: kicsinyített kép, Hold-maszk, globális élesség, telítettség -----------------
     def analyse(i, raw):
@@ -149,7 +157,9 @@ def run(inp, outdir, cfg: Config = Config()):
         if not m.any():
             return i, s.astype(np.float16), m, 0.0, 0.0
         ys, xs = np.nonzero(m)
-        sy0, sy1, sx0, sx1 = ys.min(), ys.max() + 1, xs.min(), xs.max() + 1
+        hs_, ws_ = m.shape
+        sy0, sy1 = max(0, ys.min() - 3), min(hs_, ys.max() + 4)
+        sx0, sx1 = max(0, xs.min() - 3), min(ws_, xs.max() + 4)
         me = geo.erode(m, 6)[sy0:sy1, sx0:sx1]
         mfull = cv2.resize(me.astype(np.uint8), ((sx1 - sx0) * ds, (sy1 - sy0) * ds),
                            interpolation=cv2.INTER_NEAREST).astype(bool)
@@ -159,15 +169,29 @@ def run(inp, outdir, cfg: Config = Config()):
         rc = raw[y0:y0 + g.shape[0], x0:x0 + g.shape[1]]
         mx_ = rc.max(axis=2) if rc.ndim == 3 else rc
         sat = float((mx_[mfull] >= 0.98 / scale).mean()) if mfull.any() else 0.0
-        return i, s.astype(np.float16), m, geo.sharpness(g, mfull), sat
+        q = geo.sharpness(g, mfull)
+        if sun:
+            # Nap: a perem élessége is (a felszíni mérték kevés részletnél főleg zajt mér)
+            band_s = (geo.dilate(m, 2) & ~geo.erode(m, 2))[sy0:sy1, sx0:sx1]
+            band = cv2.resize(band_s.astype(np.uint8), (mfull.shape[1], mfull.shape[0]),
+                              interpolation=cv2.INTER_NEAREST).astype(bool)
+            q = (q, geo.limb_sharpness(g, band))
+        return i, s.astype(np.float16), m, q, sat
 
     smalls, masks, sharp, satin = {}, {}, {}, {}
     for i, s, m, q, st in _pmap(src, None, analyse, workers, label="elemzés"):
         smalls[i], masks[i], sharp[i], satin[i] = s, m, q, st
     n = len(sharp)
+    if sun:
+        # Nap: felszíni részlet × perem-élesség, mindkettő a mediánjára normálva (mértani közép)
+        det = np.array([sharp[i][0] if isinstance(sharp[i], tuple) else 0.0 for i in range(n)])
+        lim = np.array([sharp[i][1] if isinstance(sharp[i], tuple) else 0.0 for i in range(n)])
+        md, ml = np.median(det[det > 0]) if (det > 0).any() else 1, np.median(lim[lim > 0]) if (lim > 0).any() else 1
+        for i in range(n):
+            sharp[i] = float(np.sqrt(max(det[i] / md, 0) * max(lim[i] / ml, 0)))
     ts = src.timestamps or list(range(n))
     names = src.names()[:n]
-    _log(f"elemzés kész: {n} kocka; beégett pixelek a bemeneten (Hold): "
+    _log(f"elemzés kész: {n} kocka ({'Nap' if sun else 'Hold'}); beégett pixelek a bemeneten: "
          f"medián {np.median(list(satin.values())) * 100:.3f}%, max {max(satin.values()) * 100:.3f}%", t0)
 
     order = sorted(sharp, key=lambda i: -sharp[i])
@@ -183,7 +207,8 @@ def run(inp, outdir, cfg: Config = Config()):
     def align(i):
         if i == ref_i:
             return i, np.eye(3), 1.0, "ref"
-        h, c, m = geo.align_one(ref_small, masks[ref_i], ref_kp, ref_desc, smalls[i].astype(np.float32), masks[i])
+        h, c, m = geo.align_one(ref_small, masks[ref_i], ref_kp, ref_desc, smalls[i].astype(np.float32), masks[i],
+                                sun=sun)
         return i, h, c, m
 
     with ThreadPoolExecutor(workers) as ex:
@@ -373,6 +398,25 @@ def run(inp, outdir, cfg: Config = Config()):
                  + (f", rms {dinfo['rms_before']:.2f} -> {dinfo['rms_after']:.2f} px" if 'rms_before' in dinfo else "")
                  + ")", t0)
 
+    # ---- 5a. szenzorhoz rögzített porszemek (Napnál alapból) ------------------------------------
+    dust_info = dict(enabled=False, msg="kikapcsolva")
+    if use_dust:
+        from . import dust as dustmod
+        k = min(30, len(cand))
+        dsel = [cand[j] for j in np.unique(np.round(np.linspace(0, len(cand) - 1, k)).astype(int))]
+        dmap, dust_info = dustmod.estimate(src, dsel, corrected, maps, ref0, ref_mask, W, H, masks, ds,
+                                           log=lambda s_: _log(s_, t0))
+        if dmap is not None:
+            inv_g = (inv_g if inv_g is not None else np.ones((H, W), np.float32)) / dmap
+            cv2.imwrite(os.path.join(outdir, "_pormaszk.png"),
+                        np.clip(dmap * 255, 0, 255).astype(np.uint8))
+            _log(f"pormaszk: {dust_info['specks']} porszem/hiba a szenzoron (legmélyebb "
+                 f"{dust_info['max_depth'] * 100:.0f}%), minden kockán korrigálva", t0)
+            ref0, ref_mask, aps, step = build_reference()
+            _log(f"referencia pormentesen újraépítve; AP-rács: {len(aps)} pont", t0)
+        else:
+            _log(f"pormaszk: nincs korrekció ({dust_info.get('msg')})", t0)
+
     # ---- 5b. próbafuttatásos kalibráció (AP-box × kiválasztási arány) ---------------------------
     trial_info = None
     if cfg.trial or cfg.trial_only:
@@ -561,7 +605,14 @@ def run(inp, outdir, cfg: Config = Config()):
         save16(os.path.join(outdir, f"{base}_mineral.tif"), mineral)
         save8(os.path.join(outdir, f"{base}_mineral.png"), mineral)
         _log(f"ásványi hold (mineral moon) kép elkészült, erősség {cfg.mineral:g}", t0)
-    _log(f"fényesség: beégett pixel a Holdon — bemenet max {bright['input_saturated_max'] * 100:.3f}%, "
+    if sun and cfg.sun_enhance:
+        enh = sun_enhance(lin, cm)
+        save16(os.path.join(outdir, f"{base}_nap_kiemelt.tif"), enh)
+        save8(os.path.join(outdir, f"{base}_nap_kiemelt.png"), enh)
+        _log("Nap: szélsötétedés-kiegyenlített, kiemelt változat elkészült (_nap_kiemelt)", t0)
+    if os.path.exists(os.path.join(outdir, "_pormaszk.png")):
+        os.replace(os.path.join(outdir, "_pormaszk.png"), os.path.join(outdir, f"{base}_pormaszk.png"))
+    _log(f"fényesség: beégett pixel a célponton — bemenet max {bright['input_saturated_max'] * 100:.3f}%, "
          f"stack {bright['stack_saturated'] * 100:.3f}%, élesített {bright['sharpened_saturated'] * 100:.3f}%", t0)
 
     vis = cv2.cvtColor(np.clip(ref0 * 255, 0, 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
@@ -585,7 +636,9 @@ def run(inp, outdir, cfg: Config = Config()):
         local_shift_px=dict(median=float(np.median(shmag)) if shmag.size else None,
                             p95=float(np.percentile(shmag, 95)) if shmag.size else None),
         flat={k: v for k, v in calib.items() if k != "gains"}, distortion=dinfo, brightness=bright,
-        trial_calibration=trial_info,
+        trial_calibration=trial_info, target=cfg.target,
+        dust={k: v for k, v in dust_info.items() if k != "speck_list"} | (
+            {"specks_top": dust_info.get("speck_list", [])[:10]} if dust_info.get("enabled") else {}),
         chromatic_aberration=dict(per_frame=cainfo, residual_on_stack=ca2),
         frames_detail=[dict(name=names[i], t=float(ts[i]) if i < len(ts) else None, sharp=sharp[i],
                             saturated=satin[i], candidate=i in cand_pos, ecc=ecc.get(i), method=meth.get(i),

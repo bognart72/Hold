@@ -25,7 +25,13 @@ def disc(mask):
 
 
 def limb_psf_sigma(L, mask, n_ang=720):
-    """Gauss-PSF szigma becslése a perem sugárirányú profiljából (px). None, ha nem megbízható."""
+    """Gauss-PSF szigma (px) a perem profiljára illesztett elmosott lépcsőből (erf). None, ha nem mérhető."""
+    from .sharpen import limb_psf_sigma as lps
+    return lps(L, mask, n_ang)
+
+
+def _limb_psf_sigma_moment(L, mask, n_ang=720):
+    """RÉGI becslés (második momentum ±3 px-es ablakban) — kb. 1,6 px fölött telítődik, nem használt."""
     cx, cy, R = disc(mask)
     rr = np.arange(-20, 20.01, 0.25)
     ang = np.linspace(0, 2 * np.pi, n_ang, endpoint=False)
@@ -85,7 +91,7 @@ def spot_mask(L, mask, rho, thr=0.90, max_frac=0.01):
     return keep
 
 
-def enhance(img, mask, sigma=None, iters=30, spot_gain=0.0, facula_gain=2.5, limb_fade=0.035,
+def enhance(img, mask, sigma=None, iters=30, spot_gain=0.0, facula_gain=2.5, limb_fade=0.035, psf_frac=0.7,
             surface_deconv=0.0, log=None):
     """surface_deconv: a dekonvolúció aránya a foltokon KÍVÜL (0 = csak a foltoknál, 1 = mindenhol).
     A foltoknál teljes; a sima felszínen a dekonvolúció főleg zajt erősítene (szintetikus mérés:
@@ -102,7 +108,7 @@ def enhance(img, mask, sigma=None, iters=30, spot_gain=0.0, facula_gain=2.5, lim
     info["psf_sigma"] = sigma
     # 1–2. dekonvolúció (csak ha a PSF megbízhatóan mérhető)
     if sigma is not None:
-        Lrl = rl_deconv(L, sigma * 0.9, iters)    # kicsit alábecsült PSF: kevesebb túllövés
+        Lrl = rl_deconv(L, sigma * psf_frac, iters)    # alábecsült PSF: kevesebb túllövés
         # hol van folt: kompakt, a helyi háttérnél ≥10%-kal sötétebb területek (a foltkereső szabálya);
         # a nagy kiterjedésű, enyhe sötétedés (szélsötétedés, felszíni foltosság) NEM folt
         dark = spot_mask(L, mask, rho)

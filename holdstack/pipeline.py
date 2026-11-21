@@ -19,6 +19,7 @@ from . import flat as flatmod
 from . import ap as apmod
 from . import distortion as distmod
 from . import color as colormod
+from . import sharpen as sharpmod
 
 
 def src_is_color(src):
@@ -53,7 +54,8 @@ class Config:
     ca_frames: int = 16            # ennyi képkockából méri a CA-mezőt
     defringe: float = 0.5          # színszegély-csillapítás erőssége az élesített képen (0 = ki)
     mineral: float = 0.0           # „mineral moon” színerősítés (0 = ki, tipikusan 3-6)
-    sharpen: tuple = (2.0, 1.5, 1.2, 1.0)
+    sharpen: tuple = (2.0, 1.5, 1.2, 1.0)   # wavelet rétegerősségek (csak sharpen_mode="wavelet" esetén)
+    sharpen_mode: str = "auto"     # "auto": dekonvolúció a peremből mért PSF-fel (Hold); "wavelet": régi kézi
     target: str = "moon"           # "moon" (Hold) vagy "sun" (Nap, fehér fényű napszűrővel)
     dust: object = None            # szenzorhoz rögzített porszemek eltávolítása (None = Napnál be, Holdnál ki)
     sun_enhance: bool = True       # Nap: szélsötétedés-kiegyenlített, kiemelt változat is készül
@@ -666,8 +668,24 @@ def run(inp, outdir, cfg: Config = Config()):
     # A fényesség a bemenetével azonos (súlyozott átlag); széthúzás csak kérésre, fej-térrel.
     lin = stretch(crop, cm) if cfg.stretch else crop
     lin = np.clip(lin, 0, 1)
-    sharp_img = soft_clip(np.maximum(wavelet_sharpen(colormod.defringe(lin, cfg.defringe), cfg.sharpen), 0),
-                          cfg.knee)
+    sharpinfo = dict(mode="wavelet", amounts=list(cfg.sharpen))
+    dfr = colormod.defringe(lin, cfg.defringe)
+    sharp_lin = None
+    if cfg.sharpen_mode == "auto" and not sun:
+        # Hold: Richardson–Lucy a megvilágított peremből mért PSF-fel (mérésekkel igazolt alapbeállítás);
+        # a Napnál a teljes korong dekonvolúciója a granulációt rontotta, ott a _nap_reszlet dolgozik
+        psf = sharpmod.limb_psf_sigma(sharpmod.lum(lin), cm)
+        if psf is not None:
+            sharp_lin = sharpmod.apply(dfr, sharpmod.AUTO, psf, cm)
+            sharpinfo = dict(mode="auto", psf_sigma=psf, params=sharpmod.AUTO)
+            _log(f"élesítés: dekonvolúció, perem-PSF szigma {psf:.2f} px "
+                 f"(RL {sharpmod.AUTO['rl_iters']} iteráció)", t0)
+        else:
+            sharpinfo["msg"] = "a perem nem mérhető — wavelet-élesítés"
+            _log("élesítés: a perem nem mérhető, wavelet-élesítés", t0)
+    if sharp_lin is None:
+        sharp_lin = wavelet_sharpen(dfr, cfg.sharpen)
+    sharp_img = soft_clip(np.maximum(sharp_lin, 0), cfg.knee)
     bright = dict(
         input_saturated_median=float(np.median(list(satin.values()))),
         input_saturated_max=float(max(satin.values())),
@@ -725,7 +743,7 @@ def run(inp, outdir, cfg: Config = Config()):
         local_shift_px=dict(median=float(np.median(shmag)) if shmag.size else None,
                             p95=float(np.percentile(shmag, 95)) if shmag.size else None),
         flat={k: v for k, v in calib.items() if k != "gains"}, distortion=dinfo, brightness=bright,
-        trial_calibration=trial_info, target=cfg.target, sun_detail=sundet,
+        trial_calibration=trial_info, target=cfg.target, sun_detail=sundet, sharpening=sharpinfo,
         dust={k: v for k, v in dust_info.items() if k != "speck_list"} | (
             {"specks_top": dust_info.get("speck_list", [])[:10]} if dust_info.get("enabled") else {}),
         chromatic_aberration=dict(per_frame=cainfo, residual_on_stack=ca2),

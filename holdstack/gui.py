@@ -101,7 +101,7 @@ class App(tk.Tk):
         num(5, "Csúcsfény-levágás (knee)", "knee", 0.85, 0.5, 1.0, 0.05, "beégés ellen")
         num(6, "Színszegély-csillapítás", "defringe", 0.5, 0.0, 1.0, 0.1, "0 = ki")
         num(7, "Ásványi hold erőssége", "mineral", 4.0, 1.0, 10.0, 0.5, "ha be van kapcsolva")
-        ttk.Label(opt, text="Élesítés (wavelet rétegek)").grid(row=8, column=0, sticky="w", pady=2)
+        ttk.Label(opt, text="Wavelet rétegek (ha nincs dekonv.)").grid(row=8, column=0, sticky="w", pady=2)
         self.vars["sharpen"] = tk.StringVar(value="2.0,1.5,1.2,1.0")
         ttk.Entry(opt, textvariable=self.vars["sharpen"], width=16).grid(row=8, column=1, columnspan=2, sticky="w")
 
@@ -112,6 +112,7 @@ class App(tk.Tk):
                 ("flat", "Vinyettálás-korrekció (önkalibráló flat)", True),
                 ("distortion", "Torzítás-önkalibráció (ferde telefon)", True),
                 ("ca", "Kromatikus aberráció korrekció", True),
+                ("deconv", "Dekonvolúciós élesítés (PSF a Hold pereméből)", True),
                 ("gain", "Képkockánkénti fényesség-kiegyenlítés", True),
                 ("mineral", "Ásványi hold (mineral moon) kép is készüljön", False),
                 ("trial", "Próbafuttatásos kalibráció a futás elején", False),
@@ -231,6 +232,7 @@ class App(tk.Tk):
         for k in ("refine", "flat", "distortion", "ca", "gain"):
             self.flags[k].set(bool(DEFAULTS[k]))
         self.flags["mineral"].set(False)
+        self.flags["deconv"].set(True)
         self.flags["stretch"].set(False)
         self.flags["trial"].set(False)
         self._save_settings()
@@ -335,6 +337,7 @@ class App(tk.Tk):
              "--defringe", v["defringe"]]
         f = {k: x.get() for k, x in self.flags.items()}
         if not f["ca"]: a.append("--no-ca")
+        if not f.get("deconv", True): a += ["--sharpen-mode", "wavelet"]
         if f["mineral"]: a += ["--mineral", v["mineral"]]
         if not f["refine"]: a.append("--no-refine")
         if not f["flat"]: a.append("--no-flat")
@@ -526,6 +529,12 @@ class App(tk.Tk):
             lines.append(f"Célpont: {'Nap' if r.get('target') == 'sun' else 'Hold'}; pormaszk: "
                          + (f"{du['specks']} porszem eltávolítva (legmélyebb {du['max_depth'] * 100:.0f}%)"
                             if du.get("enabled") else f"nincs ({du.get('msg', '')})"))
+        sp = r.get("sharpening") or {}
+        if sp.get("mode") == "auto":
+            lines.append(f"Élesítés: dekonvolúció, PSF szigma a Hold pereméből {sp['psf_sigma']:.2f} px")
+        elif sp:
+            lines.append("Élesítés: wavelet " + ",".join(f"{x:g}" for x in sp.get("amounts", []))
+                         + (f" ({sp['msg']})" if sp.get("msg") else ""))
         sd = r.get("sun_detail") or {}
         if sd.get("enabled"):
             ps = sd.get("psf_sigma")

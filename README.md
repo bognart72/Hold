@@ -88,8 +88,8 @@ A hosszú, jó minőségű videó újabb hibát hozott ki. **A foltok a korong k
 
 Napnál a program egy harmadik kimenetet is készít (`holdstack/sunpost.py`). A színarányt nem változtatja, csak a fényességet.
 
-1. **PSF a peremből.** A napkorong pereme valójában éles lépcső. A stacken látszó elmosódottsága a teljes (légköri + optikai + stack) elmosódás. A sugárirányú peremprofil deriváltjából 720 irányban mért szélesség mediánja adja a Gauss-PSF szigmáját. A 3. videón ez 1,6 px.
-2. **Richardson–Lucy dekonvolúció csak a foltoknál.** 30 iteráció, csillapítással (arány 1/1,6…1,6), a PSF 90%-ával (kevesebb túllövés). Csak a foltok és közvetlen környezetük kapja meg, puha átmenettel; a perem előtt kikapcsol. A foltokat ugyanaz a szabály jelöli ki, mint az illesztésnél: kompakt, a helyi háttérnél legalább 10%-kal sötétebb területek.
+1. **PSF a peremből.** A napkorong pereme valójában éles lépcső. A stacken látszó elmosódottsága a teljes (légköri + optikai + stack) elmosódás. A peremprofilokra illesztett elmosott lépcső (erf) adja a Gauss-PSF szigmáját (lásd v0.6). A 3. videón ez 2,85 px.
+2. **Richardson–Lucy dekonvolúció csak a foltoknál.** 30 iteráció, csillapítással (arány 1/1,6…1,6), a PSF 70%-ával (kevesebb túllövés; a szintetikus igazsághoz igazítva). Csak a foltok és közvetlen környezetük kapja meg, puha átmenettel; a perem előtt kikapcsol. A foltokat ugyanaz a szabály jelöli ki, mint az illesztésnél: kompakt, a helyi háttérnél legalább 10%-kal sötétebb területek.
 3. **Fáklyamezők.** A szélsötétedés kiegyenlítése után a 2–25 px léptékű **pozitív** eltérés erősödik (`--facula`, alap 2,5). A súly a perem felé nő, mert ott látszanak a fáklyamezők. A legszélső 1,5%-os sávban és a foltokon nincs kiemelés, a szűrés a korongon belül normált, így a peremen nem keletkezik hamis világos gyűrű.
 
 Mérés a szintetikus napon (ismert igazsággal):
@@ -98,8 +98,8 @@ Mérés a szintetikus napon (ismert igazsággal):
 |---|---|---|---|---|
 | Utófeldolgozás nélkül | 0,898 | 0,966 / 0,767 | 0,011 | – |
 | Dekonvolúció az egész korongon | 0,789 | – | – | – |
-| **Dekonvolúció csak a foltoknál** | 0,877 | **1,005 / 0,927** | **0,004** | +4,2% |
-| ugyanez 50 iterációval | 0,877 | 1,002 / 0,935 | 0,003 | +5,1% |
+| **Dekonvolúció csak a foltoknál** (PSF × 0,7) | 0,878 | **1,013 / 0,942** | **0,004** | +4,2% |
+| ugyanez PSF × 0,9-cel | 0,878 | 1,062 / 1,008 | 0,002 | +5,6% (túl mély foltok) |
 
 - A teljes korong dekonvolúciója a sima felszínen főleg zajt erősít (részlethűség 0,90 → 0,79), ezért csak a foltoknál fut.
 - A foltoknál a legkisebb foltok is visszakapják a mélységük nagy részét (min. 0,77 → 0,93), az umbra–penumbra határ élesebb, a penumbra szintje közelebb van a valódihoz.
@@ -273,6 +273,31 @@ A teljes képen mérve, alap (64 px, 20%) és kalibrált (24 px, 20%) összevet�
 - A videón a seeing apró léptékben torzít, ezt a kis AP-box jobban követi. A kiterjesztés itt kellett: a 24 px-es box a kiinduló listában nem is szerepelt.
 - **Ára:** ötször annyi AP. Ezért készült a v0.5 (lent).
 
+## v0.6 – dekonvolúciós élesítés a Hold pereméből mért PSF-fel
+
+A régi wavelet-élesítés minden felvételre ugyanazt a fix rétegerősséget használta. A v0.6 helyette **megméri**, mennyire mosódott el a stack, és ezt az elmosódást **visszafordítja** (dekonvolúció). Holdnál ez az alapértelmezés (`--sharpen-mode auto`, a felületen **Dekonvolúciós élesítés**). Ha a perem nem mérhető (pl. vékony sarló), a program a régi wavelet-élesítést használja.
+
+**Hogyan működik** (`holdstack/sharpen.py`)
+1. **PSF a peremből.** A Hold megvilágított pereme a valóságban éles lépcső. Robusztus körillesztés a peremre (a terminátor nem kör, kiesik). A sugár a valódi legmeredekebb pontra kerül, mert fényudvarnál a maszk határa kint van az égen. A szögenként igazított profilok mediánjára elmosott lépcsőt (erf) illeszt, szabad belső/külső szinttel, így a szórt fény „szoknyája” nem torzít. Ismert elmosású mesterséges korongon, fényudvarral is 2–7%-on belül pontos.
+2. **Richardson–Lucy dekonvolúció**: 40 iteráció, a mért PSF 0,8-szeresével, csillapítással.
+3. **Sötét-kivezetés:** ahol a helyi fényesség a korong mediánjának ~30%-a alatt van (terminátor, árnyékok), a dekonvolúció fokozatosan kikapcsol. Ott főleg a zajt erősítené („férges” hullámminta).
+4. **Haló-fék csak a perem sávjában:** a perem körüli ~6·σ sávban az eredmény nem léphet túl nagyon a bemenet helyi min/max értékén. Így eltűnik a perem menti világos csík, a felszín belseje pedig nem lágyul.
+
+**Hogyan mértük.** A Holdhoz nincs „igazság”, ezért a mérések egy független tesztpadon futottak (`tools/bench_rl.py`, `tools/bench_rl2.py`). Az igazság a stack felére kicsinyített, élesebb és kevésbé zajos változata. Ezt a stack saját PSF-jére mostuk el, és hozzáadtuk a stack saját, valódi (korrelált) zaját. A tesztpad 3 valódi stacken futott: h001-videó, 20260112-videó, 17 fotó.
+
+| Hiba az igazsághoz (élesítés nélkül = 1, kisebb a jobb) | perem sávja | felszín |
+|---|---|---|
+| Régi wavelet (2,0/1,5/1,2/1,0) | 0,76 | 0,87 |
+| RL 40 / 0,8 | 0,50 | 0,72 |
+| **RL 40 / 0,8 + sötét-kivezetés + peremfék (új alap)** | 0,53 | **0,72** |
+
+- Az iterációszám és a PSF-arány rácson lett kiválasztva (10–80 iteráció × 0,7–1,0). A 30–60 iteráció és a 0,8-es arány mindhárom felvételen közel optimális. 1,0-nál (a teljes PSF-fel) már túllő.
+- **Wavelet a dekonvolúció után minden esetben rontott**, zajos rétegküszöböléssel is. Ezért az új alap nem használ waveletet.
+- Kipróbált, de elvetett ötlet: a stack *önmagán* végzett kalibrációja (a stackot még egyszer elmosva keresni a legjobb beállítást). Ingadozott, és elmaradt a fenti rögzített beállítástól, mert a stack maga is elmosott „igazság”. Emiatt a wavelet-erősségek külön próbafutásos kalibrációja sem került be: a mérés szerint nincs mit kalibrálni rajtuk.
+- A dekonvolúciót a mérés a hibamértéktől függetlenül szemre is igazolta: a kráterperemek és a kis kráterek határozottabbak, a zaj nem nő láthatóan.
+
+**Napnál** ugyanez a PSF-mérés került a `_nap_reszlet` képbe. A régi, momentum-alapú becslés kb. 1,6 px-nél telítődött, ezért a valódi Napon 2,85 px helyett 1,6-ot mért. A helyes PSF-fel a szintetikus igazsághoz igazítva a PSF-arány 0,7 lett: foltmélység-arány 1,013, túllövés 4,2% (igazság 3,0%). A Nap `_stack_sharpened` képe továbbra is waveletes, mert a teljes korong dekonvolúciója a granulációt rontotta.
+
 ## v0.5 – minőség az első, és gyorsabb sűrű AP-rács
 
 **Elv: a képminőség az elsődleges szempont, a sebesség csak utána.** Gyorsítás csak akkor kerül be, ha a minőségi mutatók nem romlanak.
@@ -316,7 +341,8 @@ Példa: a mintavideóra 36 px-es AP-boxot, 13 px-es keresést, erős élesítés
 | `--search` | 16 | lokális keresési sugár px-ben |
 | `--no-refine` | | a finomító második mérés kihagyása (gyorsabb) |
 | `--no-flat` | | a vinyettálás-korrekció kikapcsolása |
-| `--sharpen` | 2.0,1.5,1.2,1.0 | wavelet-rétegek erőssége (1 = változatlan), csak a fényességcsatornán |
+| `--sharpen-mode` | auto | `auto`: dekonvolúció a Hold pereméből mért PSF-fel (lásd v0.6); `wavelet`: a régi kézi élesítés |
+| `--sharpen` | 2.0,1.5,1.2,1.0 | wavelet-rétegek erőssége (1 = változatlan), csak a fényességcsatornán; csak `wavelet` módban, vagy ha a perem nem mérhető |
 | `--no-distortion` | | a szenzorhoz kötött torzítás önkalibrációjának kikapcsolása |
 | `--dist-deg` | 3 | a torzításpolinom foka (2–4) |
 | `--stretch` | | automatikus széthúzás fej-térrel; **alapból ki**, a fényesség megegyezik a bemenetével |

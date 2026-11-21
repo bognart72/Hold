@@ -39,7 +39,10 @@ def main():
     p.add_argument("--no-flat", action="store_true", help="vinyettálás-korrekció kikapcsolása")
     p.add_argument("--flat-deg", type=int, default=3)
     p.add_argument("--no-gain", action="store_true")
-    p.add_argument("--sharpen", type=str, help=f"wavelet rétegerősségek (alap: {DEFAULTS['sharpen']})")
+    p.add_argument("--sharpen", type=str,
+                   help=f"wavelet rétegerősségek, csak --sharpen-mode wavelet esetén (alap: {DEFAULTS['sharpen']})")
+    p.add_argument("--sharpen-mode", default="auto", choices=["auto", "wavelet"],
+                   help="auto (alap): dekonvolúció a Hold pereméből mért PSF-fel; wavelet: a régi kézi élesítés")
     p.add_argument("--no-distortion", action="store_true", help="torzítás-önkalibráció kikapcsolása")
     p.add_argument("--dist-deg", type=int, default=3, help="torzításpolinom foka (2-4)")
     p.add_argument("--stretch", action="store_true",
@@ -77,7 +80,8 @@ def main():
                  mineral=a.mineral, sharpen=tuple(float(x) for x in str(v["sharpen"]).split(",")),
                  trial=a.trial, trial_only=a.trial_only, workers=a.workers,
                  target="sun" if a.target in ("sun", "nap") else "moon", dust=a.dust,
-                 sun_enhance=not a.no_sun_enhance, sun_detail=not a.no_sun_detail, facula_gain=a.facula)
+                 sun_enhance=not a.no_sun_enhance, sun_detail=not a.no_sun_detail, facula_gain=a.facula,
+                 sharpen_mode=a.sharpen_mode)
     run(a.input, a.out, cfg)
 
 

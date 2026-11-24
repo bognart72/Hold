@@ -189,6 +189,20 @@ def sharpen_L(L, p, psf=None, sel=None, rl_cache=None, mask=None):
         loc = cv2.GaussianBlur(L, (0, 0), 4)
         w = np.clip((loc - 0.5 * dark * ref) / (0.5 * dark * ref), 0, 1)
         base = w * base + (1 - w) * L
+    st = p.get("strength", 1.0)
+    if st < 1.0 and base is not L:
+        base = st * base + (1 - st) * L          # a dekonvolúció erőssége (0 = ki, 1 = teljes)
+    hc = p.get("hi_cap")
+    if hc is not None and base is not L:
+        # csúcsfény-védelem: sehol sem lehet sokkal fényesebb a bemenet 5×5-ös környezetének
+        # legfényesebb pontjánál (puha korlát) — ami a stackben nem égett be, az élesítéstől sem fog
+        top = cv2.dilate(L, np.ones((5, 5), np.uint8)) * (1 + hc) + 1e-5
+        over = base > top
+        if over.any():
+            pad = np.maximum(top * hc, 1e-4)
+            b2 = base.copy()
+            b2[over] = top[over] + pad[over] * np.tanh((base[over] - top[over]) / pad[over])
+            base = b2
     out = nr_wavelet(base, amounts(p["gain"], p["shape"]), p.get("k", 0.0), sel=sel)
     out = clamp_halo(out, L, p.get("clamp"))
     ec = p.get("edge_clamp")
@@ -205,7 +219,11 @@ def sharpen_L(L, p, psf=None, sel=None, rl_cache=None, mask=None):
 
 # a mérésekkel igazolt alapbeállítás (tools/bench_rl.py, bench_rl2.py): RL 40 iteráció a perem-PSF
 # 0,8-szeresével, sötét-kivezetés 0,3, haló-fék 0,25 csak a perem sávjában, wavelet nélkül
-AUTO = dict(rl_iters=40, rl_frac=0.8, gain=0.0, shape=0.5, k=0.0, clamp=None, dark=0.3, edge_clamp=0.25)
+# v6.1 (tools/bench_gentle.py): a v6 (40 it., teljes erő) a csúcsfényeket felhúzta (beégés) és a
+# fotós stacken túllőtt; 30 it., 70% erősség és csúcsfény-védelem mindhárom felvételen jobb a régi
+# waveletnél, beégés nélkül
+AUTO = dict(rl_iters=30, rl_frac=0.8, gain=0.0, shape=0.5, k=0.0, clamp=None, dark=0.3, edge_clamp=0.25,
+            strength=0.7, hi_cap=0.02)
 
 
 def apply(img, p, psf=None, mask=None):

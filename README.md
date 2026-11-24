@@ -279,7 +279,8 @@ A régi wavelet-élesítés minden felvételre ugyanazt a fix rétegerősséget 
 
 **Hogyan működik** (`holdstack/sharpen.py`)
 1. **PSF a peremből.** A Hold megvilágított pereme a valóságban éles lépcső. Robusztus körillesztés a peremre (a terminátor nem kör, kiesik). A sugár a valódi legmeredekebb pontra kerül, mert fényudvarnál a maszk határa kint van az égen. A szögenként igazított profilok mediánjára elmosott lépcsőt (erf) illeszt, szabad belső/külső szinttel, így a szórt fény „szoknyája” nem torzít. Ismert elmosású mesterséges korongon, fényudvarral is 2–7%-on belül pontos.
-2. **Richardson–Lucy dekonvolúció**: 40 iteráció, a mért PSF 0,8-szeresével, csillapítással.
+2. **Richardson–Lucy dekonvolúció**: 30 iteráció, a mért PSF 0,8-szeresével, csillapítással, **70%-os erősséggel** (`--deconv-strength`, a felületen „Dekonvolúció erőssége”).
+   **Csúcsfény-védelem:** az élesített kép sehol sem lehet 2%-nál fényesebb a bemenet 5×5-ös környezetének legfényesebb pontjánál (puha korlát). Ami a stackben nem égett be, az az élesítéstől sem ég be.
 3. **Sötét-kivezetés:** ahol a helyi fényesség a korong mediánjának ~30%-a alatt van (terminátor, árnyékok), a dekonvolúció fokozatosan kikapcsol. Ott főleg a zajt erősítené („férges” hullámminta).
 4. **Haló-fék csak a perem sávjában:** a perem körüli ~6·σ sávban az eredmény nem léphet túl nagyon a bemenet helyi min/max értékén. Így eltűnik a perem menti világos csík, a felszín belseje pedig nem lágyul.
 
@@ -289,14 +290,24 @@ A régi wavelet-élesítés minden felvételre ugyanazt a fix rétegerősséget 
 |---|---|---|
 | Régi wavelet (2,0/1,5/1,2/1,0) | 0,76 | 0,87 |
 | RL 40 / 0,8 | 0,50 | 0,72 |
-| **RL 40 / 0,8 + sötét-kivezetés + peremfék (új alap)** | 0,53 | **0,72** |
+| RL 40 / 0,8 + sötét-kivezetés + peremfék (v0.6) | 0,53 | 0,72 |
+
+**v0.6.1 – a v0.6 túl agresszív volt.** A teljes erejű dekonvolúció a fényes kráterperemeket a bemenetnél jóval fényesebbre húzta: a h001-videón a szinte fehér (> 0,95) pixelek aránya 0,002%-ról 0,085%-ra nőtt, ezek beégtek. Az újabb fotós stacken ráadásul túllőtt: a hibája rosszabb lett, mint élesítés nélkül. Új mérés (`tools/bench_gentle.py`, hiba a tesztpadon és csúcsfény a valódi stacken):
+
+| Változat | hiba: h001 / 20260112 / fotók (élesítés nélkül = 1) | > 0,95 pixelek átlaga |
+|---|---|---|
+| Régi wavelet | 0,87 / 0,80 / 0,88 | 0,001% |
+| v0.6: RL 40 / 0,8 | 0,74 / 0,56 / **1,05** | **0,028%** |
+| **v0.6.1: RL 30 / 0,8, 70%, csúcsfény-védelem (új alap)** | **0,79 / 0,68 / 0,77** | **0,001%** |
+
+Az új alap mindhárom felvételen jobb a régi waveletnél, és nem ég be.
 
 - Az iterációszám és a PSF-arány rácson lett kiválasztva (10–80 iteráció × 0,7–1,0). A 30–60 iteráció és a 0,8-es arány mindhárom felvételen közel optimális. 1,0-nál (a teljes PSF-fel) már túllő.
 - **Wavelet a dekonvolúció után minden esetben rontott**, zajos rétegküszöböléssel is. Ezért az új alap nem használ waveletet.
 - Kipróbált, de elvetett ötlet: a stack *önmagán* végzett kalibrációja (a stackot még egyszer elmosva keresni a legjobb beállítást). Ingadozott, és elmaradt a fenti rögzített beállítástól, mert a stack maga is elmosott „igazság”. Emiatt a wavelet-erősségek külön próbafutásos kalibrációja sem került be: a mérés szerint nincs mit kalibrálni rajtuk.
 - A dekonvolúciót a mérés a hibamértéktől függetlenül szemre is igazolta: a kráterperemek és a kis kráterek határozottabbak, a zaj nem nő láthatóan.
 
-**Napnál** ugyanez a PSF-mérés került a `_nap_reszlet` képbe. A régi, momentum-alapú becslés kb. 1,6 px-nél telítődött, ezért a valódi Napon 2,85 px helyett 1,6-ot mért. A helyes PSF-fel a szintetikus igazsághoz igazítva a PSF-arány 0,7 lett: foltmélység-arány 1,013, túllövés 4,2% (igazság 3,0%). A Nap `_stack_sharpened` képe továbbra is waveletes, mert a teljes korong dekonvolúciója a granulációt rontotta.
+**Napnál** ugyanez a PSF-mérés került a `_nap_reszlet` képbe. A régi, momentum-alapú becslés kb. 1,6 px-nél telítődött, ezért a valódi Napon 2,85 px helyett 1,6-ot mért. A helyes PSF-fel a szintetikus igazsághoz igazítva a PSF-arány 0,7 lett: foltmélység-arány 1,013, túllövés 4,2% (igazság 3,0%). A Nap `_elesitett` képe továbbra is waveletes, mert a teljes korong dekonvolúciója a granulációt rontotta.
 
 ## v0.5 – minőség az első, és gyorsabb sűrű AP-rács
 
@@ -349,7 +360,8 @@ Példa: a mintavideóra 36 px-es AP-boxot, 13 px-es keresést, erős élesítés
 | `--knee` | 0.85 | lágy csúcsfény-levágás kezdete az élesített képen |
 | `--no-ca` | | a kromatikus aberráció korrekciójának kikapcsolása |
 | `--defringe` | 0.5 | színszegély-csillapítás erőssége az élesített képen (0–1) |
-| `--mineral` | 0 | „mineral moon” (ásványi hold) kép készítése ezzel a színerősítéssel, pl. `--mineral 5` |
+| `--mineral` | 4 | „mineral moon” (ásványi hold) színerősítés; Holdnál mindig készül (0 = mégse) |
+| `--deconv-strength` | 0.7 | a dekonvolúciós élesítés erőssége 0–1 |
 
 ### Kromatikus aberráció
 
@@ -364,7 +376,7 @@ Megjegyzés: a Samsung telefon JPEG-jei már a telefonban CA-korrigáltak (a mé
 
 ### Ásványi hold (mineral moon)
 
-Opcionális külön kép: `*_mineral.tif` és `*_mineral.png`.
+Holdnál mindig elkészül: `*_mineral.tif` és `*_mineral.png` (erősség: `--mineral`, alap 4).
 - A fényesség az élesített képé.
 - A színinformáció lépései:
   1. Zajmentesítés: normált konvolúció, csak a megvilágított felszínből.
@@ -383,7 +395,11 @@ Opcionális külön kép: `*_mineral.tif` és `*_mineral.png`.
 ### Kimenet (`-o` mappa)
 
 - `*_stack.tif`: 16 bites, élesítetlen stack. Ezt érdemes továbbvinni (Registax, AstroSurface, PixInsight).
-- `*_stack_sharpened.tif`, `*_preview.png`: alap wavelet-élesítéssel.
+- Mindig PNG-ben (8 bit) és TIF-ben (16 bit) is:
+  - `*_stack`: az élesítetlen stack
+  - `*_elesitett`: dekonvolúciós élesítéssel (Napnál és `--sharpen-mode wavelet` esetén waveletes)
+  - `*_wavelet`: a régi wavelet-élesítéssel, összehasonlításhoz
+  - `*_mineral`: ásványi hold (csak Holdnál)
 - `*_aps.jpg`: az alignment pointok a referencián. Zöld = megbízható, piros = gyakran sikertelen.
 - `*_flat.png`: a becsült vinyettálás.
 - Napnál: `*_nap_kiemelt.png/.tif` (szélsötétedés-kiegyenlített), `*_nap_reszlet.png/.tif` (umbra–penumbra dekonvolúció + fáklyamezők), `*_pormaszk.png`.

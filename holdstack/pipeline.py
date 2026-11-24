@@ -53,7 +53,8 @@ class Config:
     ca: bool = True                # kromatikus aberráció (laterális CA + légköri diszperzió) korrekciója
     ca_frames: int = 16            # ennyi képkockából méri a CA-mezőt
     defringe: float = 0.5          # színszegély-csillapítás erőssége az élesített képen (0 = ki)
-    mineral: float = 0.0           # „mineral moon” színerősítés (0 = ki, tipikusan 3-6)
+    mineral: float = 4.0           # „mineral moon” színerősítés (Holdnál mindig készül; 0 = ki, tipikusan 3-6)
+    deconv_strength: float = 0.7   # a dekonvolúciós élesítés erőssége (0-1; 0,7 a mért optimum, beégés nélkül)
     sharpen: tuple = (2.0, 1.5, 1.2, 1.0)   # wavelet rétegerősségek (csak sharpen_mode="wavelet" esetén)
     sharpen_mode: str = "auto"     # "auto": dekonvolúció a peremből mért PSF-fel (Hold); "wavelet": régi kézi
     target: str = "moon"           # "moon" (Hold) vagy "sun" (Nap, fehér fényű napszűrővel)
@@ -676,25 +677,30 @@ def run(inp, outdir, cfg: Config = Config()):
         # a Napnál a teljes korong dekonvolúciója a granulációt rontotta, ott a _nap_reszlet dolgozik
         psf = sharpmod.limb_psf_sigma(sharpmod.lum(lin), cm)
         if psf is not None:
-            sharp_lin = sharpmod.apply(dfr, sharpmod.AUTO, psf, cm)
-            sharpinfo = dict(mode="auto", psf_sigma=psf, params=sharpmod.AUTO)
+            sp = dict(sharpmod.AUTO, strength=float(np.clip(cfg.deconv_strength, 0, 1)))
+            sharp_lin = sharpmod.apply(dfr, sp, psf, cm)
+            sharpinfo = dict(mode="auto", psf_sigma=psf, params=sp)
             _log(f"élesítés: dekonvolúció, perem-PSF szigma {psf:.2f} px "
-                 f"(RL {sharpmod.AUTO['rl_iters']} iteráció)", t0)
+                 f"(RL {sp['rl_iters']} iteráció, erősség {sp['strength']:.0%}, csúcsfény-védelem)", t0)
         else:
             sharpinfo["msg"] = "a perem nem mérhető — wavelet-élesítés"
             _log("élesítés: a perem nem mérhető, wavelet-élesítés", t0)
-    if sharp_lin is None:
-        sharp_lin = wavelet_sharpen(dfr, cfg.sharpen)
-    sharp_img = soft_clip(np.maximum(sharp_lin, 0), cfg.knee)
+    # a wavelet-változat mindig elkészül (összehasonlításhoz, külön fájlba)
+    wav_img = soft_clip(np.maximum(wavelet_sharpen(dfr, cfg.sharpen), 0), cfg.knee)
+    sharp_img = wav_img if sharp_lin is None else soft_clip(np.maximum(sharp_lin, 0), cfg.knee)
     bright = dict(
         input_saturated_median=float(np.median(list(satin.values()))),
         input_saturated_max=float(max(satin.values())),
         stack_saturated=clipped_fraction(lin, cm), sharpened_saturated=clipped_fraction(sharp_img, cm),
         stack_mean=float(lin[cm].mean()))
     base = os.path.splitext(os.path.basename(os.path.normpath(inp)))[0]
+    # mindig: élesítetlen stack, élesített (dekonvolúció), wavelet — 16 bites TIF és PNG
     save16(os.path.join(outdir, f"{base}_stack.tif"), lin)
-    save16(os.path.join(outdir, f"{base}_stack_sharpened.tif"), sharp_img)
-    save8(os.path.join(outdir, f"{base}_preview.png"), sharp_img)
+    save8(os.path.join(outdir, f"{base}_stack.png"), lin)
+    save16(os.path.join(outdir, f"{base}_elesitett.tif"), sharp_img)
+    save8(os.path.join(outdir, f"{base}_elesitett.png"), sharp_img)
+    save16(os.path.join(outdir, f"{base}_wavelet.tif"), wav_img)
+    save8(os.path.join(outdir, f"{base}_wavelet.png"), wav_img)
     if cfg.mineral > 0 and lin.ndim == 3:
         mineral = colormod.mineral_moon(colormod.defringe(lin, max(cfg.defringe, 0.7)), cfg.mineral, cm,
                                         luminance=sharp_img)

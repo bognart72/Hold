@@ -50,8 +50,10 @@ def main():
     p.add_argument("--knee", type=float, help=f"lágy csúcsfény-levágás kezdete (alap: {DEFAULTS['knee']})")
     p.add_argument("--no-ca", action="store_true", help="kromatikus aberráció korrekciójának kikapcsolása")
     p.add_argument("--defringe", type=float, help=f"színszegély-csillapítás 0-1 (alap: {DEFAULTS['defringe']})")
-    p.add_argument("--mineral", type=float, default=0.0,
-                   help="'mineral moon' kép készítése ezzel a színerősítéssel (pl. 4; 0 = nem készül)")
+    p.add_argument("--mineral", type=float, default=4.0,
+                   help="'mineral moon' színerősítés (alap: 4; Holdnál mindig készül, 0 = mégse)")
+    p.add_argument("--deconv-strength", type=float, default=0.7,
+                   help="dekonvolúciós élesítés erőssége 0-1 (alap: 0.7; nagyobb = élesebb, de zajosabb)")
     p.add_argument("--workers", type=int, default=0)
     a = p.parse_args()
     from .sysutil import disable_power_throttling
@@ -81,7 +83,7 @@ def main():
                  trial=a.trial, trial_only=a.trial_only, workers=a.workers,
                  target="sun" if a.target in ("sun", "nap") else "moon", dust=a.dust,
                  sun_enhance=not a.no_sun_enhance, sun_detail=not a.no_sun_detail, facula_gain=a.facula,
-                 sharpen_mode=a.sharpen_mode)
+                 sharpen_mode=a.sharpen_mode, deconv_strength=a.deconv_strength)
     run(a.input, a.out, cfg)
 
 

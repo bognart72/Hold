@@ -100,12 +100,13 @@ class App(tk.Tk):
         num(4, "Keresési sugár (px)", "search", 16, 4, 64, 2)
         num(5, "Csúcsfény-levágás (knee)", "knee", 0.85, 0.5, 1.0, 0.05, "beégés ellen")
         num(6, "Színszegély-csillapítás", "defringe", 0.5, 0.0, 1.0, 0.1, "0 = ki")
-        num(7, "Ásványi hold erőssége", "mineral", 4.0, 1.0, 10.0, 0.5, "ha be van kapcsolva")
+        num(7, "Ásványi hold erőssége", "mineral", 4.0, 1.0, 10.0, 0.5, "mindig elkészül")
         ttk.Label(opt, text="Wavelet rétegek (ha nincs dekonv.)").grid(row=8, column=0, sticky="w", pady=2)
         self.vars["sharpen"] = tk.StringVar(value="2.0,1.5,1.2,1.0")
         ttk.Entry(opt, textvariable=self.vars["sharpen"], width=16).grid(row=8, column=1, columnspan=2, sticky="w")
 
         num(9, "Nap: fáklyamező-kiemelés", "facula", 2.5, 0.0, 6.0, 0.5, "0 = ki; 5 fölött túl erős")
+        num(10, "Dekonvolúció erőssége", "deconv_strength", 0.7, 0.0, 1.0, 0.1, "0,7 = mért optimum")
         self.flags = {}
         for r, (key, text, default) in enumerate([
                 ("refine", "Finomító második mérés", True),
@@ -114,9 +115,8 @@ class App(tk.Tk):
                 ("ca", "Kromatikus aberráció korrekció", True),
                 ("deconv", "Dekonvolúciós élesítés (PSF a Hold pereméből)", True),
                 ("gain", "Képkockánkénti fényesség-kiegyenlítés", True),
-                ("mineral", "Ásványi hold (mineral moon) kép is készüljön", False),
                 ("trial", "Próbafuttatásos kalibráció a futás elején", False),
-                ("stretch", "Automatikus széthúzás (alapból ki – beéghet)", False)], start=10):
+                ("stretch", "Automatikus széthúzás (alapból ki – beéghet)", False)], start=11):
             v = tk.BooleanVar(value=default)
             ttk.Checkbutton(opt, text=text, variable=v).grid(row=r, column=0, columnspan=3, sticky="w")
             self.flags[key] = v
@@ -168,7 +168,8 @@ class App(tk.Tk):
         # A képek vásznon (Canvas) jelennek meg: a vászon nem veszi fel a kép méretét, így az
         # átméretezés nem vált ki újabb <Configure> eseményt (nincs végtelen méretezési ciklus).
         self.img_tabs = {}
-        for key, title in [("preview", "Eredmény"), ("mineral", "Ásványi hold"), ("sun_enh", "Nap kiemelt"),
+        for key, title in [("preview", "Élesített"), ("wavelet", "Wavelet"), ("stack", "Stack"),
+                           ("mineral", "Ásványi hold"), ("sun_enh", "Nap kiemelt"),
                            ("sun_det", "Nap részlet"),
                            ("aps", "Alignment pontok"), ("torzitas", "Torzítási mező"), ("flat", "Vinyettálás"),
                            ("dust", "Pormaszk")]:
@@ -231,7 +232,7 @@ class App(tk.Tk):
         self.vars["facula"].set("2.5")
         for k in ("refine", "flat", "distortion", "ca", "gain"):
             self.flags[k].set(bool(DEFAULTS[k]))
-        self.flags["mineral"].set(False)
+        self.vars["deconv_strength"].set("0.7")
         self.flags["deconv"].set(True)
         self.flags["stretch"].set(False)
         self.flags["trial"].set(False)
@@ -338,7 +339,7 @@ class App(tk.Tk):
         f = {k: x.get() for k, x in self.flags.items()}
         if not f["ca"]: a.append("--no-ca")
         if not f.get("deconv", True): a += ["--sharpen-mode", "wavelet"]
-        if f["mineral"]: a += ["--mineral", v["mineral"]]
+        a += ["--mineral", v["mineral"], "--deconv-strength", v.get("deconv_strength") or "0.7"]
         if not f["refine"]: a.append("--no-refine")
         if not f["flat"]: a.append("--no-flat")
         if not f["distortion"]: a.append("--no-distortion")
@@ -478,7 +479,8 @@ class App(tk.Tk):
     def _show_results(self):
         out = self.out.get()
         base = os.path.splitext(os.path.basename(os.path.normpath(self.inp.get())))[0]
-        files = dict(preview=f"{base}_preview.png", mineral=f"{base}_mineral.png",
+        files = dict(preview=f"{base}_elesitett.png", wavelet=f"{base}_wavelet.png", stack=f"{base}_stack.png",
+                     mineral=f"{base}_mineral.png",
                      sun_enh=f"{base}_nap_kiemelt.png", sun_det=f"{base}_nap_reszlet.png",dust=f"{base}_pormaszk.png", aps=f"{base}_aps.jpg",
                      torzitas=f"{base}_torzitas.png", flat=f"{base}_flat.png")
         for k, fn in files.items():
